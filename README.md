@@ -2,6 +2,8 @@
 A penguin volley game!
 
 ## Game Sheet
+<img width="40%" alt="PengPong1" src="https://github.com/aoineko-fr/PengPong/blob/master/doc/img/pengpong1.png" /> <img width="40%" alt="PengPong2" src="https://github.com/aoineko-fr/PengPong/blob/master/doc/img/pengpong2.png" />
+
 - <ins>Machine</ins>: **MSX1** (enhanced on **MSX2** or above)
 - <ins>RAM</ins>:     **16 KB**
 - <ins>Format</ins>:  **32 KB ROM**
@@ -9,6 +11,7 @@ A penguin volley game!
 - <ins>Players</ins>: **1** or **2**
 
 ## Gameplay
+
 Peng-Pong is a fun sports game where two penguins face off using rules inspired by ping-pong and volleyball.
 
 ### Rules
@@ -70,3 +73,4 @@ You can press those keys when starting the game to force some special behavior:
 - `[1]`: Force MSX1 mode
 - `[2]`: Force MSX2 mode
 - `[3]`: Reset options (including the video processor frequency)
+
