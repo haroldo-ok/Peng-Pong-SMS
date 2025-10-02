@@ -52,7 +52,7 @@ ProjModules = [ ProjName ];
 // ProjSegments = ProjName;
 
 //-- List of library modules to build (array)
-LibModules = [ "arkos/akm_player", "compress/pletter", "game/main", "game/pawn", "game/menu", "sprite_fx", "bios", "system", "vdp", "print", "input", "clock" ];
+LibModules = [ "arkos/akm_player", "compress/pletter", "game/state", "game/pawn", "game/menu", "sprite_fx", "bios", "system", "vdp", "print", "input", "clock" ];
 
 //-- Additional sources to be compiled and linked with the project (array)
 // AddSources = [];

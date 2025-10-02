@@ -263,6 +263,7 @@
 #define PAWN_USE_RT_LOAD			TRUE	// Load sprite pattern data on the fly (real-time)
 #define PAWN_USE_SPRT_FX			TRUE	// Allow sprite effects (crop, flip, mask, rotate)
 #define PAWN_SPRITE_SIZE			16		// Sprite size mode (8 for 8x8 pixel mode, or 16 for 16x16)
+#define PAWN_BLEND_OFFSET			4		// Sprite pattern offset for blending mode
 #define PAWN_USE_PHYSICS			TRUE	// Add physics and collision features
 // Pawn coordinate unit
 // - PAWN_UNIT_SCREEN				Default screen (pixel) unit (8-bit unsigned int)

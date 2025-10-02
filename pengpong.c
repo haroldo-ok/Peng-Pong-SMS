@@ -12,7 +12,7 @@
 
 // MSXgl
 #include "msxgl.h"
-#include "game/main.h"
+#include "game/state.h"
 #include "game/pawn.h"
 #include "game/menu.h"
 #include "clock.h"
@@ -40,33 +40,30 @@
 #define GAME_VERSION				"1.1"
 
 // Gameplay value
-#define BALL_GRAVITY				Q4_4_SET(0.15f)
-#define FALL_MAX_SPEED				Q4_4_SET(3.0f)
-
-#define JUMP_FORCE					Q4_4_SET(-3.0f)
-#define GRAVITY						Q4_4_SET(0.2f)
-#define MOVE_FRICTION				Q4_4_SET(0.1f)
-#define MOVE_ACCEL					Q4_4_SET(0.33f)
-#define MOVE_MAX_SPEED				Q4_4_SET(1.5f)
-
-#define BOUNCE_FORCE				Q4_4_SET(-2.5f)
-#define COL_DIST					16
-
-#define SHADOW_COLOR				COLOR_LIGHT_BLUE
+#define BALL_GRAVITY				Q4_4_SET(0.15f)		// Gravity apply to ball
+#define FALL_MAX_SPEED				Q4_4_SET(3.0f)		// Ball max fall speed
+#define GRAVITY						Q4_4_SET(0.2f)		// Gravity apply to player
+#define JUMP_FORCE					Q4_4_SET(-3.0f)		// Player jump force
+#define MOVE_FRICTION				Q4_4_SET(0.1f)		// Player friction with ground
+#define MOVE_ACCEL					Q4_4_SET(0.33f)		// Player acceleration
+#define MOVE_MAX_SPEED				Q4_4_SET(1.5f)		// Player max speed
+#define COL_DIST					16					// Player vs ball collision distance
+#define SHADOW_COLOR				COLOR_LIGHT_BLUE	// Color of the shadow sprite
 
 // Background
-#define HORIZON_H					11
-#define NET_H						7
+#define HORIZON_H					11					// Horizon height in tiles
+#define NET_H						7					// Net height in tiles
 
 // VRAM Tables Address
-#define VRAM_PATTERN_TABLE			0x0000
-#define VRAM_COLOR_TABLE			0x2000
-#define VRAM_LAYOUT_TABLE			0x3800
-#define VRAM_SPRITE_PATTERN			0x1800
-#define VRAM_SPRITE_ATTRIBUTE		0x3E00
+#define VRAM_PATTERN_TABLE			0x0000				// Address of the pattern generator table (PGT)
+#define VRAM_COLOR_TABLE			0x2000				// Address of the pattern color table (PCT)
+#define VRAM_LAYOUT_TABLE			0x3800				// Address of the pattern name table (PNT)
+#define VRAM_SPRITE_PATTERN			0x1800				// Address of the sprite pattern table (SPT)
+#define VRAM_SPRITE_ATTRIBUTE		0x3E00				// Address of the sprite attribute table (SAT)
 
-#define MUSIC_ADDRESS				0xE800
-#define SFX_ADDRESS					0xE000
+// Audio buffers
+#define SFX_ADDRESS					0xE000				// Address in RAM where SFX are unpacked
+#define MUSIC_ADDRESS				0xE800				// Address in RAM where music is unpacked
 
 // Index of all menu pages
 enum MENU_PAGES
@@ -79,18 +76,18 @@ enum MENU_PAGES
 	MENU_AUDIO,    // Audio options page
 	MENU_GRAPH,    // Graphical options page
 	MENU_CREDITS1, // Credits page
-	MENU_CREDITS2,    // Infos page
+	MENU_CREDITS2, // Infos page
 //.............................
-	MENU_MAX,      // Number of menu
+	MENU_MAX,
 };
 
 // Input set enumeration
 enum INPUT_SET
 {
-	INPUT_SET_KB1 = 0,
-	INPUT_SET_KB2,
-	INPUT_SET_JOY1,
-	INPUT_SET_JOY2,
+	INPUT_SET_KB1 = 0, // Keyboard set 1 (DFG)
+	INPUT_SET_KB2,     // Keyboard set 2 (arrow keys)
+	INPUT_SET_JOY1,    // Joystick in port 1
+	INPUT_SET_JOY2,    // Joystick in port 2
 //.............................
 	INPUT_SET_MAX,
 };
@@ -112,13 +109,13 @@ enum INPUT_ACTION
 // Actions id
 enum ACTION_PLAYER_ID
 {
-	ACTION_PLAYER_IDLE = 0,
-	ACTION_PLAYER_MOVE,
-	ACTION_PLAYER_JUMP,
-	ACTION_PLAYER_FALL,
-	ACTION_PLAYER_HIT,
-	ACTION_PLAYER_WIN,
-	ACTION_PLAYER_LOOSE,
+	ACTION_PLAYER_IDLE = 0, // Player is idle
+	ACTION_PLAYER_MOVE,     // Player is moving right or left
+	ACTION_PLAYER_JUMP,     // Player is jumping
+	ACTION_PLAYER_FALL,     // Player is falling
+	ACTION_PLAYER_HIT,      // Player hit the ball
+	ACTION_PLAYER_WIN,      // Player winning animation
+	ACTION_PLAYER_LOOSE,    // Player loosing animation
 //.............................
 	ACTION_PLAYER_MAX,
 };
@@ -126,20 +123,20 @@ enum ACTION_PLAYER_ID
 // Actions id
 enum ACTION_BALL_ID
 {
-	ACTION_BALL_IDLE = 0,
-	ACTION_BALL_BUMP,
+	ACTION_BALL_IDLE = 0, // Ball is idle (moving in the air)
+	ACTION_BALL_BUMP,     // Ball hit the ground or a player
 //.............................
-ACTION_BALL_MAX,
+	ACTION_BALL_MAX,
 };
 
 // Score type
 enum SCORE_ID
 {
-	SCORE_OUT = 0,
-	SCORE_BOUNCE,
-	SCORE_PASS,
+	SCORE_OUT = 0, // Ball go out without bounce or dribble
+	SCORE_BOUNCE,  // Ball bounce on the ground too many times
+	SCORE_DRIBBLE, // Player hit the ball too many times
 	//.............................
-	SCORE_MAX
+	SCORE_MAX,
 };
 
 // AI level
@@ -182,13 +179,13 @@ enum SPRITE_ID
 	SPRITE_PLY2_BLACK,					// 3		Player 2 black
 	SPRITE_PLY1_RED,					// 4 		Player 1 red
 	SPRITE_PLY2_RED,					// 5		Player 2 red
-	SPRITE_WIN_BACK,					// 6
+	SPRITE_WIN_BACK,					// 6		Winning pannel...
 	SPRITE_WIN_FRONT,					// 7
-	SPRITE_BALL_SHADOW,					// 8
+	SPRITE_BALL_SHADOW,					// 8		Shadows...
 	SPRITE_PLY1_SHADOW,					// 9
 	SPRITE_PLY2_SHADOW,					// 10
-	SPRITE_HIT_MARKER,					// 11
-	SPRITE_CLOUD,						// 12-27
+	SPRITE_HIT_MARKER,					// 11		Hit marker for debug
+	SPRITE_CLOUD,						// 12-27	Clouds...
 //.............................
 	SPRITE_MAX,
 };
@@ -226,32 +223,32 @@ enum SFX_ID
 };
 
 // Gameplay character stricture
-struct Character
+typedef struct Character
 {
-	u8			ID;
-	bool		bFreeze;
-	bool		bMoving;
-	bool		bInAir;
-	i8			VelocityX;	// Format Q4.4 [-8:7.94]
-	i8			VelocityY;	// Format Q4.4 [-8:7.94]
-	i8			RestX;	// Format Q4.4 [-8:7.94]
-	i8			RestY;	// Format Q4.4 [-8:7.94]
-	u8			Input;
-	u8			Score;
-	Pawn		Pawn;
-	u8			Shadow;
-};
+	u8			ID;        // Character ID (Player: Left=0, Right=1. Ball: 0)
+	bool		bFreeze;   // Freeze character (use for ball during serve)
+	bool		bMoving;   // Is character moving (for player)
+	bool		bInAir;    // Is character in the air (for player)
+	i8			VelocityX; // Horizontal velocity   Format Q4.4 [-8:7.94]
+	i8			VelocityY; // Vertical velociy      Format Q4.4 [-8:7.94]
+	i8			RestX;     // Horizontal move rest  Format Q4.4 [-8:7.94]
+	i8			RestY;     // Vertical move rest    Format Q4.4 [-8:7.94]
+	u8			Input;     // Current input state (for player)
+	u8			Score;     // Current score (for player)
+	Pawn		Pawn;      // Pawn structure
+	u8			Shadow;    // Shadow sprite index
+} Character;
 
 // Gameplay rule structure
-struct Rule
+typedef struct Rule
 {
-	u8			GamePoints;
-	u8			MaxBounce;
-	u8			MaxPass;
-};
+	u8			GamePoints; // Points to win a game
+	u8			MaxBounce;  // Max bounce on ground allowed
+	u8			MaxDribble; // Max bounce on player allowed
+} Rule;
 
 // Option data structure
-struct Option
+typedef struct Option
 {
 	bool		Music;				// 1
 	bool		SFX;				// 1
@@ -261,21 +258,21 @@ struct Option
 	u8			Palette;			// 3
 	u8   		InputSet[3];		// 3 x 2
 	u8			AILevel;			// 2		AI level for each player
-	struct Rule	Rule;				// 6 + 4
-};
+	Rule		Rule;				// 6 + 4
+} Option;
 
 // Cloud data structure
-struct Cloud
+typedef struct Cloud
 {
-	u8			X;
-	u8			Y;
-	u8			Pattern;
-	u8			Sprite;
-	u8			Mask;
-};
+	u8			X;       // Cloud sprite X coordinate
+	u8			Y;       // Cloud sprite Y coordinate
+	u8			Pattern; // Cloud sprite pattern index
+	u8			Sprite;  // Cloud sprite index
+	u8			Mask;    // Cloud sprite speed mask (for parallax effect)
+} Cloud;
 
-// Functions
-typedef u8 (*cbInputCheck)(void);				// Callback default signature
+// Function signature for input check
+typedef u8 (*cbInputCheck)(void);
 
 // States prototype
 bool State_AppInit();
@@ -291,6 +288,7 @@ bool State_Point();
 bool State_VictoryInit();
 bool State_VictoryUpdate();
 
+// Functions prototype
 void DrawScore();
 void DrawInfo(u8 event);
 void UpdateBallColor();
@@ -338,7 +336,7 @@ u8 GetBallHitX_Hard();
 // Background by Yaz
 #include "content/data_bg2.h"
 
-// Audio data
+// Audio data by Makoto
 #include "content/music_empty.h"
 #include "content/music_main.h"
 #include "content/music_victory.h"
@@ -348,9 +346,11 @@ u8 GetBallHitX_Hard();
 // Player 1 data
 
 // Player's sprite layers
-// This character is made by 3 layers (3 sprites) but the first two are special: One is only visible on even frames while the second only on odd frames.
-// So, on the 3 layers, only two are visible at a given frame. The blinking of the first two black layers is done to create shaded colors.
-// The counterpart is the flickering effect. The character white color comes from the background and is not in a sprite.
+// This character is made of 3 colors: red for beak and feet, black for eyes and body and white for belly.
+// White color is not in a sprite but a "hole" that let see the background color (characters can't move outside white area).
+// Red color is a normal sprite layer.
+// Black color is a sprite layer with color blending enabled. This means that the black color sprite will be flickered quickly to create shaded colors.
+// The counterpart is the flickering effect.
 const Pawn_Sprite g_SpriteLayers[] =
 {
 //	  Sprite ID
@@ -396,20 +396,20 @@ const Pawn_Frame g_FramesFall[] =
 	{ 9*12,	4, NULL },
 };
 
-// 
+// Animation when player hit the ball
 const Pawn_Frame g_FramesHit[] =
 {
 	{ 12*12, 12, NULL },
 };
 
-// 
+// Winning animation frames
 const Pawn_Frame g_FramesWin[] =
 {
 	{ 14*12, 25, NULL },
 	{ 15*12, 25, NULL },
 };
 
-// 
+// Loosing animation frames
 const Pawn_Frame g_FramesLost[] =
 {
 	{ 13*12, 4,	NULL },
@@ -436,6 +436,8 @@ const Pawn_Sprite g_SpriteLayers2[] =
 	{ SPRITE_PLY2_RED,   0, 0, 0, COLOR_LIGHT_RED, 0 },
 	{ SPRITE_PLY2_BLACK, 0, 0, 4, COLOR_BLACK,     PAWN_SPRITE_BLEND },
 };
+
+// Note: No need to redefine animations, player 2 use the same as player 1
 
 //.............................................................................
 // Ball data
@@ -471,8 +473,8 @@ const Pawn_Action g_BallActions[ACTION_BALL_MAX] =
 //.............................................................................
 
 // Clouds data
-const struct Cloud g_Cloud[] =
-{
+const Cloud g_Cloud[] =
+{ //    X   Y   Pattern  Sprite number      Time mask
 	{  30,  8,  80 + 64, SPRITE_CLOUD + 0,  0b00000111 },
 	{  46,  8,  88 + 64, SPRITE_CLOUD + 2,  0b00000111 },
 	{ 140, 20,  96 + 64, SPRITE_CLOUD + 4,  0b00001111 },
@@ -483,7 +485,7 @@ const struct Cloud g_Cloud[] =
 	{ 248, 38, 120 + 64, SPRITE_CLOUD + 14, 0b01111111 },
 };
 
-// Custom palette
+// Custom palette (for MSX2)
 const u16 g_CustomPalette[15] =
 {
 	RGB16(0, 0, 0), // black				RGB16(0, 0, 0),
@@ -503,7 +505,7 @@ const u16 g_CustomPalette[15] =
 	RGB16(7, 7, 7)  // white				RGB16(7, 7, 7) 
 };
 
-// Gray scale palette
+// Gray scale palette (for MSX2)
 const u16 g_GrayPalette[15] =
 {
 	RGB16(0, 0, 0), // black				RGB16(0, 0, 0),
@@ -523,7 +525,7 @@ const u16 g_GrayPalette[15] =
 	RGB16(7, 7, 7)  // white				RGB16(7, 7, 7) 
 };
 
-// 
+// Input set name (for menu display)
 const c8* g_InputSetName[INPUT_SET_MAX] =
 {
 	"DFG",
@@ -532,9 +534,8 @@ const c8* g_InputSetName[INPUT_SET_MAX] =
 	"[2",
 };
 
-// 
+// List of input check functions
 const cbInputCheck g_InputCheck[INPUT_SET_MAX] = { CheckKB1, CheckKB2, CheckJoy1, CheckJoy2 };
-
 
 // GM2 font color (1 color per line)
 const u8 g_FontColorNormal[8] =
@@ -549,7 +550,7 @@ const u8 g_FontColorNormal[8] =
 	COLOR_MERGE(COLOR_MEDIUM_RED, COLOR_WHITE),
 };
 
-// GM2 font color (1 color per line)
+// GM2 alternative font color (1 color per line)
 const u8 g_FontColorSelect[8] =
 {
 	COLOR_MERGE(COLOR_LIGHT_RED, COLOR_WHITE),
@@ -562,7 +563,7 @@ const u8 g_FontColorSelect[8] =
 	COLOR_MERGE(COLOR_DARK_RED, COLOR_WHITE),
 };
 
-// 
+// Shadows sprite pattern definition (upper line only)
 const u8 g_ShadowPattern[] =
 {
 	0b00111111, 0b11111111,
@@ -570,17 +571,17 @@ const u8 g_ShadowPattern[] =
 	0b00000000, 0b11111100,
 };
 
-// 
+// Shadow pattern index according to Y position (in rows number)
 const u8 g_ShadowPatternId[24] =
 { // 0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22  23
 	36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 32, 32, 32, 32, 28, 28, 28, 24, 24, 24, 24
 };
 
-// Liste des animations
+// List of all musics
 const u8 *const g_MusicTable[MUSIC_MAX] = { g_MusicEmpty, g_MusicMain, g_Musicvictory };
 
 // Default options
-const struct Option g_OptionDefault = { TRUE, TRUE, TRUE, TRUE, FREQ_AUTO, PAL_CUSTOM, { INPUT_SET_KB1, INPUT_SET_KB2, INPUT_SET_KB2 }, AI_MEDIUM, { 11, 1, 3 } };
+const Option g_OptionDefault = { TRUE, TRUE, TRUE, TRUE, FREQ_AUTO, PAL_CUSTOM, { INPUT_SET_KB1, INPUT_SET_KB2, INPUT_SET_KB2 }, AI_MEDIUM, { 11, 1, 3 } };
 
 // AI reception position offset
 const i8 g_AIReceptOffset[] = { 8, 12, 16, 16, 16, 16, 16, 16 };
@@ -589,154 +590,169 @@ const i8 g_AIReceptOffset[] = { 8, 12, 16, 16, 16, 16, 16, 16 };
 // MEMORY DATA
 //=============================================================================
 
-u16  g_StateTimer = 0;
-u8   g_VersionVDP;
-u8   g_FreqCurrent;
-u8   g_FreqDetected;
+u16  g_StateTimer = 0;        // State specific timer (in frame number)
+u8   g_VersionVDP;            // Detected VDP version
+u8   g_FreqCurrent;           // Current frequency (FREQ_50HZ or FREQ_60HZ)
+u8   g_FreqDetected;          // Frequency detected from the Main-ROM or from the VDP (FREQ_50HZ or FREQ_60HZ)
 
-u8   g_SaveData[6];
-bool g_Saved = FALSE;
+u8   g_SaveData[6];           // Save data buffer
+bool g_Saved = FALSE;         // Is options saved (no modification occurred since last save)?
 
 // Characters
-struct Character g_Player[2];
-struct Character g_Ball;
-u8   g_CollisionMap[32*24];
-bool g_BallHit;
-u8   g_BallGroundX;
+Character g_Player[2];        // Players data
+Character g_Ball;             // Ball data
+u8   g_CollisionMap[32*24];   // Collision tile map
+bool g_BallHit;               // Did ball hit a player during this frame?
+u8   g_BallGroundX;           // Prediction of ball X position when it will hit the ground
 
-i16  g_CloudX[numberof(g_Cloud)];
+i16  g_CloudX[numberof(g_Cloud)]; // Clound sprites X coordinate (can be negative for smooth transition)
 
 // AI
-bool g_AIGame;
-u8   g_AIWait;
+bool g_AIGame;                 // Is one player controlled by AI?
+u8   g_AIWait;                 // Wait time before AI serve
 
 // Rules
-u8   g_Field = 0;
-u8   g_BounceNum = 0;
-u8   g_PassNum = 0;
-u8   g_ChangeNum = 0;
-u8   g_LastTouch = 0;
-u8   g_Victorious = 0;
-cbInputCheck g_InputCheck1;
-cbInputCheck g_InputCheck2;
-cbInputCheck g_AIPredict;
+u8   g_Field = 0;              // Current field (0=left, 1=right)
+u8   g_BounceNum = 0;          // Number of bounce on ground during current point
+u8   g_DribbleNum = 0;         // Number of bounce on ball during current point
+u8   g_ChangeNum = 0;          // Number of time the ball change side during current point
+u8   g_LastTouch = 0;          // ID of the last player that hit the ball (0=left, 1=right)
+u8   g_Victorious = 0;         // ID of the player that win the game (0=left, 1=right)
+
+cbInputCheck g_InputCheck1;    // Current input check function for player 1
+cbInputCheck g_InputCheck2;    // Current input check function for player 2
+cbInputCheck g_AIPredict;      // Current AI prediction function (depending on AI level)
+u8 g_PrevInput = INPUT_NONE;   // Previous input state (for debouncing)
 
 // Audio
-u8   g_CurrentMusic = 0xFF;
-u8   g_NextMusic = 0xFF;
-u8   g_NextSFX[3] = { 0xFF, 0xFF, 0xFF };
-u8   g_NextSFXVol[3];
+u8   g_CurrentMusic = 0xFF;    // Current music index
+u8   g_NextMusic = 0xFF;       // Next music to play (0xFF = no change)
+u8   g_NextSFX[3] = { 0xFF, 0xFF, 0xFF }; // Next SFX to play on each channel (0xFF = no change)
+u8   g_NextSFXVol[3];          // Next SFX volume on each channel (0-15)
 
 // Options parameters
-struct Option g_Option;
+Option g_Option;               // Current options
 
 //.............................................................................
 // Menu
 
-const MenuItemMinMax g_MenuPointsMinMax = { 1, 60, 1 };
-const MenuItemMinMax g_MenuBouncesMinMax =  { 0, 10, 1 };
+// Min/max structures used to bound integer menu entries
+const MenuItemMinMax g_MenuPointsMinMax  = { 1, 60, 1 };
+const MenuItemMinMax g_MenuBouncesMinMax = { 0, 10, 1 };
 
 // Entries description for the Main menu
 const MenuItem g_MenuMain[] =
 {
-	{ "PLY VS PLY",          MENU_ITEM_GOTO, NULL, MENU_VERSUS },	// Entry to start a game (will trigger MenuAction_Start with value equal to '1')
-	{ "PLY VS CPU",          MENU_ITEM_GOTO, NULL, MENU_SOLO },		// Entry to start a game (will trigger MenuAction_Start with value equal to '1')
-	{ "OPTIONS",             MENU_ITEM_GOTO, NULL, MENU_OPTION },	// Entry to go to Option menu page
-	{ "CREDITS",             MENU_ITEM_GOTO, NULL, MENU_CREDITS1 },	// Entry to go to Option menu page
+//	  Text (name of the item)
+//    |             Type (type of the item; define the meaning of 'Action' and 'Value')
+//    |             |                 Action (action associated to the item: Callback, MinMax clamp, Pointer to variable)
+//    |             |                 |                 Value (value associated to the item)
+//    |             |                 |                 |
+	{ "PLY VS PLY", MENU_ITEM_GOTO,   NULL,             MENU_VERSUS },   // Open player vs player game menu. When type is MENU_ITEM_GOTO, 'Value' is the menu index to open
+	{ "PLY VS CPU", MENU_ITEM_GOTO,   NULL,             MENU_SOLO },     // Open player vs AI game menu
+	{ "OPTIONS",    MENU_ITEM_GOTO,   NULL,             MENU_OPTION },   // Open Option menu
+	{ "CREDITS",    MENU_ITEM_GOTO,   NULL,             MENU_CREDITS1 }, // Open Credits menu
 	#if ((TARGET == TARGET_BIN_DISK) || (TARGET == TARGET_BIN_TAPE) || (TARGET == TARGET_DOS1) || (TARGET == TARGET_DOS2))
-	{ NULL,                  MENU_ITEM_EMPTY, NULL, 0 },			// Blank entry to create a gap
-	{ "EXIT",                MENU_ITEM_ACTION, MenuAction_Start, 0 },			// Entry to exit the game (will trigger MenuAction_Start with value equal to '0')
+	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },             // Blank entry
+	{ "EXIT",       MENU_ITEM_ACTION, MenuAction_Start, 0 },             // Exit the game (only for BASIC or MSX-DOS environment)
 	#endif
 };
 
-// Entries description for the Start menu
+// Entries description for the Versus menu
 const MenuItem g_MenuVersus[] =
-{
-	{ "START>",              MENU_ITEM_ACTION, MenuAction_Start, 1 }, // Entry to change the screen mode (will trigger MenuAction_Screen)
-	{ "PLAYER 1",            MENU_ITEM_ACTION, MenuAction_Input, 0 }, // Entry display a text aligned to left
-	{ "PLAYER 2",            MENU_ITEM_ACTION, MenuAction_Input, 1 }, // Entry display a text aligned to center
-	{ "RULES>",              MENU_ITEM_GOTO, NULL, MENU_RULES },	// Entry to start a game (will trigger MenuAction_Start with value equal to '1')
-	{ NULL,                  MENU_ITEM_EMPTY, NULL, 0 },               // Blank entry to create a gap
-	{ "BACK",                MENU_ITEM_GOTO, NULL, MENU_MAIN },        // Entry to go back to the main menu
+{ //  Entry text    Type              Action            Value
+	{ "START>",     MENU_ITEM_ACTION, MenuAction_Start, 1 },          // Start a versus game. When type is MENU_ITEM_ACTION, 'Action' is a callback and 'Value' is a value passed to the callback
+	{ "PLAYER 1",   MENU_ITEM_ACTION, MenuAction_Input, 0 },          // Change player 1 input set
+	{ "PLAYER 2",   MENU_ITEM_ACTION, MenuAction_Input, 1 },          // Change player 2 input set
+	{ "RULES>",     MENU_ITEM_GOTO,   NULL,             MENU_RULES }, // Open Rules menu
+	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },          // Blank entry
+	{ "BACK",       MENU_ITEM_GOTO,   NULL,             MENU_MAIN },  // Go back to the Main menu
 };
 
-// Entries description for the Start menu
+// Entries description for the Solo menu
 const MenuItem g_MenuSolo[] =
-{
-	{ "START>",              MENU_ITEM_ACTION, MenuAction_Start, 2 }, // Entry to change the screen mode (will trigger MenuAction_Screen)
-	{ "CONTROL",             MENU_ITEM_ACTION, MenuAction_Input, 2 }, // Entry display a text aligned to center
-	{ "CPU",                 MENU_ITEM_ACTION, MenuAction_AI,    0 }, // Entry display a text aligned to left
-	{ "RULES>",              MENU_ITEM_GOTO, NULL, MENU_RULES },	// Entry to start a game (will trigger MenuAction_Start with value equal to '1')
-	{ NULL,                  MENU_ITEM_EMPTY, NULL, 0 },               // Blank entry to create a gap
-	{ "BACK",                MENU_ITEM_GOTO, NULL, MENU_MAIN },        // Entry to go back to the main menu
+{ //  Entry text    Type              Action            Value
+	{ "START>",     MENU_ITEM_ACTION, MenuAction_Start, 2 },          // Start a solor game
+	{ "CONTROL",    MENU_ITEM_ACTION, MenuAction_Input, 2 },          // Change player input set
+	{ "CPU",        MENU_ITEM_ACTION, MenuAction_AI,    0 },          // Change AI level
+	{ "RULES>",     MENU_ITEM_GOTO,   NULL,             MENU_RULES }, // Open Rules menu
+	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },          // Blank entry
+	{ "BACK",       MENU_ITEM_GOTO,   NULL,             MENU_MAIN },  // Go back to the Main menu
 };
 
-// Entries description for the Start menu
+// Entries description for the Rules menu
 const MenuItem g_MenuRules[] =
-{
-	{ "POINTS",              MENU_ITEM_INT, &g_Option.Rule.GamePoints, (i16)&g_MenuPointsMinMax },
-	{ "BOUNCES",             MENU_ITEM_INT, &g_Option.Rule.MaxBounce, (i16)&g_MenuBouncesMinMax },
-	{ "PASSES",              MENU_ITEM_INT, &g_Option.Rule.MaxPass,   (i16)&g_MenuBouncesMinMax },
-	{ NULL,                  MENU_ITEM_EMPTY, NULL, 0 },               // Blank entry to create a gap
-	{ "BACK",                MENU_ITEM_BACK, NULL, 0 },        // Entry to go back to the main menu
+{ //  Entry text    Type              Action            Value
+	{ "POINTS",     MENU_ITEM_INT,    &g_Option.Rule.GamePoints, (i16)&g_MenuPointsMinMax },  // Change points to win a game. When type is MENU_ITEM_INT, 'Action' is a pointer to the variable and 'Value' is an option MenuItemMinMax structure to define values boundaries.
+	{ "BOUNCES",    MENU_ITEM_INT,    &g_Option.Rule.MaxBounce,  (i16)&g_MenuBouncesMinMax }, // Change max bounce on ground allowed
+	{ "DRIBBLES",   MENU_ITEM_INT,    &g_Option.Rule.MaxDribble, (i16)&g_MenuBouncesMinMax }, // Change max bounce on player allowed
+	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 }, // Blank entry
+	{ "BACK",       MENU_ITEM_BACK,   NULL,             0 }, // Go back to previous menu
 };
 
 // Entries description for the Option menu
+// Note: The 'const' is removed to be able to modify this array at runtime (to hide/show some entries)
 /*const*/ MenuItem g_MenuOptions[] =
-{
-	{ "AUDIO>",              MENU_ITEM_GOTO, NULL, MENU_AUDIO },
-	{ "VIDEO>",              MENU_ITEM_GOTO, NULL, MENU_GRAPH },
-	{ "SAVE",                MENU_ITEM_ACTION, MenuAction_Save, 0 },
-	{ "RESET",               MENU_ITEM_ACTION, MenuAction_Reset, 0 },
-	{ NULL,                  MENU_ITEM_EMPTY, NULL, 0 },                       // Blank entry to create a gap
-	{ "BACK",                MENU_ITEM_GOTO, NULL, MENU_MAIN },                // Entry to go back to the main menu
+{ //  Entry text    Type              Action            Value
+	{ "AUDIO>",     MENU_ITEM_GOTO,   NULL,             MENU_AUDIO }, // Open Audio menu
+	{ "VIDEO>",     MENU_ITEM_GOTO,   NULL,             MENU_GRAPH }, // Open Graph menu
+	{ "SAVE",       MENU_ITEM_ACTION, MenuAction_Save,  0 },          // Save current options to Clock's SRAM (for MSX2 or above)
+	{ "RESET",      MENU_ITEM_ACTION, MenuAction_Reset, 0 },          // Reset options to default values
+	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },          // Blank entry
+	{ "BACK",       MENU_ITEM_GOTO,   NULL,             MENU_MAIN },  // Back to the Main menu
 };
 
 // Entries description for the Audio options menu
 const MenuItem g_MenuAudio[] =
-{
-	{ "MUSIC",               MENU_ITEM_ACTION, MenuAction_Music, 0 },
-	{ "SFX",                 MENU_ITEM_BOOL, &g_Option.SFX, NULL },
-	{ NULL,                  MENU_ITEM_EMPTY, NULL, 0 },                       // Blank entry to create a gap
-	{ "BACK",                MENU_ITEM_GOTO, NULL, MENU_OPTION },                // Entry to go back to the main menu
+{ //  Entry text    Type              Action            Value
+	{ "MUSIC",      MENU_ITEM_ACTION, MenuAction_Music, 0 },           // Activate/deactivate music
+	{ "SFX",        MENU_ITEM_BOOL,   &g_Option.SFX,    NULL },        // Activate/deactivate SFX
+	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },           // Blank entry
+	{ "BACK",       MENU_ITEM_GOTO,   NULL,             MENU_OPTION }, // Back to the Option menu
 };
 
 // Entries description for the Graphical options menu
+// Note: The 'const' is removed to be able to modify this array at runtime (to hide/show some entries)
 /*const*/ MenuItem g_MenuGraph[] =
-{
-	{ "CLR MIX",             MENU_ITEM_BOOL, &g_Option.Blend, NULL },
-	{ "RULE CLR",            MENU_ITEM_BOOL, &g_Option.Feedback, NULL },
-	{ "FREQ",                MENU_ITEM_ACTION, MenuAction_Freq, 0 },
-	{ "PALETTE",             MENU_ITEM_ACTION, MenuAction_Palette, 0 },
-	{ NULL,                  MENU_ITEM_EMPTY, NULL, 0 },                       // Blank entry to create a gap
-	{ "BACK",                MENU_ITEM_GOTO, NULL, MENU_OPTION },                // Entry to go back to the main menu
+{ //  Entry text    Type              Action            Value
+	{ "CLR MIX",    MENU_ITEM_BOOL,   &g_Option.Blend,  NULL },        // Activate/deactivate color blending (using sprite flickering)
+	{ "RULE CLR",   MENU_ITEM_BOOL,   &g_Option.Feedback, NULL },      // Activate/deactivate ball rule feedback (ball color change when a rule reach its limit)
+	{ "FREQ",       MENU_ITEM_ACTION, MenuAction_Freq,  0 },           // Change screen refresh rate (for MSX2 or above)
+	{ "PALETTE",    MENU_ITEM_ACTION, MenuAction_Palette, 0 },         // Change color palette (for MSX2 or above)
+	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },           // Blank entry
+	{ "BACK",       MENU_ITEM_GOTO,   NULL,             MENU_OPTION }, // Back to the Option menu
 };
 
 // Entries description for the Credits menu
 const MenuItem g_MenuCredits1[] =
-{
-	{ "CODE        AOINEKO",     MENU_ITEM_TEXT, NULL, -3 }, // Entry display a text aligned to left
-	{ "SPRITES     GRAFXKID",    MENU_ITEM_TEXT, NULL, -3 }, // Entry display a text aligned to center
-	{ "GRAPHICS    YAZ",         MENU_ITEM_TEXT, NULL, -3 }, // Entry display a text aligned to center
-	{ "FONT        LUDO 'GFX'",  MENU_ITEM_TEXT, NULL, -3 }, // Entry display a text aligned to center
-	{ "MUSIC       MAKOTO",      MENU_ITEM_TEXT, NULL, -3 }, // Entry display a text aligned to center
-	{ NULL,                      MENU_ITEM_EMPTY, NULL, 0 },                       // Blank entry to create a gap
-	{ "NEXT>",                   MENU_ITEM_GOTO, NULL, MENU_CREDITS2 },	// Entry to go to Option menu page
+{ //  Entry text                 Type             Action    Value
+	{ "CODE        AOINEKO",     MENU_ITEM_TEXT,  NULL,     -3 }, // Display text only. When type is MENU_ITEM_TEXT, 'Value' is horizontal display offset
+	{ "DESIGN      PIXEL PHENIX",MENU_ITEM_TEXT,  NULL,     -3 },
+	{ "SPRITES     GRAFXKID",    MENU_ITEM_TEXT,  NULL,     -3 },
+	{ "GRAPHICS    YAZ",         MENU_ITEM_TEXT,  NULL,     -3 },
+	{ "FONT        LUDO 'GFX'",  MENU_ITEM_TEXT,  NULL,     -3 },
+	{ "MUSIC       MAKOTO",      MENU_ITEM_TEXT,  NULL,     -3 },
+	{ NULL,                      MENU_ITEM_EMPTY, NULL,     0 },   // Blank entry
+	{ "NEXT>",                   MENU_ITEM_GOTO,  NULL,     MENU_CREDITS2 }, // Go to next credits page
 };
 
 // Entries description for the Credits menu
 const MenuItem g_MenuCredits2[] =
-{
-	{ "VERSION " GAME_VERSION,   MENU_ITEM_TEXT, NULL, -2 }, // Entry display a text aligned to center
-	{ "MADE WITH MSXGL",         MENU_ITEM_TEXT, NULL, -2 }, // Entry display a text aligned to center
-	{ "PIXEL PHENIX & 2025",     MENU_ITEM_TEXT, NULL, -2 }, // Entry display a text aligned to center
-	{ NULL,                      MENU_ITEM_EMPTY, NULL, 0 },                       // Blank entry to create a gap
-	{ "BACK",                    MENU_ITEM_GOTO, NULL, MENU_MAIN },                // Entry to go back to the main menu
+{ //  Entry text                 Type             Action    Value
+	{ "VERSION " GAME_VERSION,   MENU_ITEM_TEXT,  NULL,     -2 }, // Display text only
+	{ "MADE WITH MSXGL",         MENU_ITEM_TEXT,  NULL,     -2 },
+	{ "PIXEL PHENIX & 2025",     MENU_ITEM_TEXT,  NULL,     -2 },
+	{ NULL,                      MENU_ITEM_EMPTY, NULL,     0 },  // Blank entry
+	{ "BACK",                    MENU_ITEM_GOTO,  NULL,     MENU_MAIN },   // Back to Main menu
 };
 
-// List of all menus
+// List of all menu pages
 const Menu g_Menus[MENU_MAX] =
 {
+//    Title (title of the page; NULL means no title)
+//    |     Items (ist of the page's menu entries)
+//    |     |               ItemNum (number of the page's menu entries)
+//    |     |               |                         Callback (function to be called when page is opened)
 	{ NULL,	g_MenuMain,     numberof(g_MenuMain),     NULL }, // MENU_MAIN
 	{ NULL,	g_MenuVersus,   numberof(g_MenuVersus),   NULL }, // MENU_VERSUS
 	{ NULL,	g_MenuSolo,     numberof(g_MenuSolo),     NULL }, // MENU_SOLO
@@ -757,22 +773,28 @@ const Menu g_Menus[MENU_MAX] =
 //-----------------------------------------------------------------------------
 
 // Set the new music to be player
+//
+// Parameters:
+//   id: Music ID (from MUSIC_xxx enum)
 inline void PlayMusic(u8 id) { if (g_Option.Music) g_NextMusic = id; }
 
-// Stop music
+// Stop current music
 inline void StopMusic() { g_NextMusic = MUSIC_EMPTY; }
 
-// Set the new music to be player
+// Set a new SFX to be player in a specific channel
+//
+// Parameters:
+//   id   - SFX ID (from SFX_xxx enum)
+//   chan - Channel to play the SFX (from ARKOS_CHANNEL_xxx enum)
+//   vol  - Volume (0-15)
 inline void PlaySFX(u8 id, u8 chan, u8 vol) { g_NextSFX[chan] = id; g_NextSFXVol[chan] = vol; }
 
 //-----------------------------------------------------------------------------
 // MENU
 //-----------------------------------------------------------------------------
 
-u8 g_PrevInput = INPUT_NONE;
-
 //-----------------------------------------------------------------------------
-//
+// Menu input handler (called by menu system)
 u8 MenuInputHandler()
 {
 	u8 in = CheckKB2() | CheckJoy1() | CheckJoy2(); // Get input from keyboard and joystick (the game use the same input value than menu)
@@ -782,20 +804,23 @@ u8 MenuInputHandler()
 }
 
 //-----------------------------------------------------------------------------
+// Menu event handler (called by menu system)
 //
+// Parameters:
+//   event - Triggered event (from MENU_EVENT_xxx enum)
 void MenuEventHandler(u8 event)
 {
 	switch (event)
 	{
-	case MENU_EVENT_UP:
+	case MENU_EVENT_UP: // User pressed UP
 		PlaySFX(SFX_TIC, ARKOS_CHANNEL_C, 0x0F);
 		break;
 
-	case MENU_EVENT_DOWN:
+	case MENU_EVENT_DOWN: // User pressed DOWN
 		PlaySFX(SFX_TAC, ARKOS_CHANNEL_C, 0x0F);
 		break;
 
-	case MENU_EVENT_SET:
+	case MENU_EVENT_SET: // User change a menu entry's value
 	case MENU_EVENT_INC:
 	case MENU_EVENT_DEC:
 		PlaySFX(SFX_CLICK, ARKOS_CHANNEL_C, 0x0F);
@@ -803,7 +828,7 @@ void MenuEventHandler(u8 event)
 		{
 		case MENU_ITEM_INT:
 		case MENU_ITEM_BOOL:
-			g_Saved = FALSE;
+			g_Saved = FALSE; // Dirty flag
 			break;
 		}
 		break;
@@ -811,17 +836,28 @@ void MenuEventHandler(u8 event)
 	// case MENU_EVENT_DRAW_TITLE:
 	// 	break;
 
-	case MENU_EVENT_DRAW_ENTRY:
-		Print_SetPatternOffset(128);
+	case MENU_EVENT_DRAW_ENTRY: // A menu entry is being drawn
+		Print_SetPatternOffset(128); // Change font offset
 		break;
-	case MENU_EVENT_DRAW_SELECTED:
+
+	case MENU_EVENT_DRAW_SELECTED:// The selected menu entry is being drawn
 		Print_SetPatternOffset(192);
 		break;
 	}
 }
 
 //-----------------------------------------------------------------------------
-// Callback to handle game start
+// Menu callback to handle game start
+//
+// Parameters:
+//   op    - Operation (from MENU_ACTION_xxx enum)
+//   value - Value associated to the operation (defined in the menu entry data)
+//           0: Exit game
+//           1: Start player vs player game
+//           2: Start player vs AI game
+//
+// Returns:
+//   String to display next to the menu entry (or NULL)
 const c8* MenuAction_Start(u8 op, i8 value)
 {
 	switch (op)
@@ -829,21 +865,21 @@ const c8* MenuAction_Start(u8 op, i8 value)
 	case MENU_ACTION_SET:
 	case MENU_ACTION_INC:
 	case MENU_ACTION_DEC:
-		if (value == 0)
+		if (value == 0) // Exit
 			Bios_Exit(0);
-		else if (value == 1) // Versus
+		else if (value == 1) // Start versus mode
 		{
 			g_AIGame = FALSE;
-			g_InputCheck1 = g_InputCheck[g_Option.InputSet[0]];
+			g_InputCheck1 = g_InputCheck[g_Option.InputSet[0]]; // Select input check function for each player
 			g_InputCheck2 = g_InputCheck[g_Option.InputSet[1]];
 			Game_SetState(State_GameInit);
 		}
-		else if (value == 2) // Solo
+		else if (value == 2) // Start solo modo
 		{
 			g_AIGame = TRUE;
-			g_InputCheck1 = CheckAI;
+			g_InputCheck1 = CheckAI; // Special input check function for AI
 			g_InputCheck2 = g_InputCheck[g_Option.InputSet[2]];
-			switch (g_Option.AILevel)
+			switch (g_Option.AILevel) // Select AI prediction function according to AI level
 			{
 			case AI_EASY:
 				g_AIPredict = GetBallHitX_Easy;
@@ -864,21 +900,31 @@ const c8* MenuAction_Start(u8 op, i8 value)
 }
 
 //-----------------------------------------------------------------------------
-// Callback to handle input
+// Menu callback to handle player input selection
+//
+// Parameters:
+//   op    - Operation (from MENU_ACTION_xxx enum)
+//   value - Value associated to the operation (defined in the menu entry data)
+//           0: Player 1 input set
+//           1: Player 2 input set
+//           2: Player input set (solo mode)
+//
+// Returns:
+//   String to display next to the menu entry (or NULL)
 const c8* MenuAction_Input(u8 op, i8 value)
 {
 	switch (op)
 	{
 	case MENU_ACTION_SET:
 	case MENU_ACTION_INC:
-	inc_input_set:
+	inc_input_set: // Search for next valid input set
 		g_Option.InputSet[value] = (g_Option.InputSet[value] + 1) % INPUT_SET_MAX;
 		if ((value < 2) && (g_Option.InputSet[value] == g_Option.InputSet[1 - value]))
 			goto inc_input_set;
 		g_Saved = FALSE;
 		break;
 	case MENU_ACTION_DEC:
-	dec_input_set:
+	dec_input_set: // Search for previous valid input set
 		g_Option.InputSet[value] = (g_Option.InputSet[value] + (INPUT_SET_MAX - 1)) % INPUT_SET_MAX;
 		if ((value < 2) && (g_Option.InputSet[value] == g_Option.InputSet[1 - value]))
 			goto dec_input_set;
@@ -886,25 +932,32 @@ const c8* MenuAction_Input(u8 op, i8 value)
 		break;
 	}
 
-	return g_InputSetName[g_Option.InputSet[value]];
+	return g_InputSetName[g_Option.InputSet[value]]; // Return input set name
 }
 
 //-----------------------------------------------------------------------------
-// Callback to handle input
+// Menu callback to handle AI level selection
+//
+// Parameters:
+//   op    - Operation (from MENU_ACTION_xxx enum)
+//   value - Value associated to the operation (not used here)
+//
+// Returns:
+//   String to display next to the menu entry (or NULL)
 const c8* MenuAction_AI(u8 op, i8 value)
 {
 	value;
 	switch (op)
 	{
 	case MENU_ACTION_SET:
-	case MENU_ACTION_INC:
+	case MENU_ACTION_INC: // Select next AI level
 		if (g_Option.AILevel < AI_MAX - 1)
 			g_Option.AILevel++;
 		else
 			g_Option.AILevel = 0;
 		g_Saved = FALSE;
 		break;
-	case MENU_ACTION_DEC:
+	case MENU_ACTION_DEC: // Select previous AI level
 		if (g_Option.AILevel > 0)
 			g_Option.AILevel--;
 		else
@@ -926,21 +979,28 @@ const c8* MenuAction_AI(u8 op, i8 value)
 }
 
 //-----------------------------------------------------------------------------
-// Callback to handle frequency change
+// Menu callback to handle frequency change
+//
+// Parameters:
+//   op    - Operation (from MENU_ACTION_xxx enum)
+//   value - Value associated to the operation (not used here)
+//
+// Returns:
+//   String to display next to the menu entry (or NULL)
 const c8* MenuAction_Freq(u8 op, i8 value)
 {
 	value;
 	switch (op)
 	{
 	case MENU_ACTION_SET:
-	case MENU_ACTION_INC:
+	case MENU_ACTION_INC: // Select next frequency option
 		if (g_Option.Freq < FREQ_MAX - 1)
 			g_Option.Freq++;
 		else
 			g_Option.Freq = 0;
 		g_Saved = FALSE;
 		break;
-	case MENU_ACTION_DEC:
+	case MENU_ACTION_DEC: // Select previous frequency option
 		if (g_Option.Freq > 0)
 			g_Option.Freq--;
 		else
@@ -949,7 +1009,7 @@ const c8* MenuAction_Freq(u8 op, i8 value)
 		break;
 	}
 
-	ApplyFreqOption();
+	ApplyFreqOption(); // Set frequency according to new option or default detected value
 	if (g_Option.Freq == FREQ_60HZ) 
 		return "60HZ";
 	else if (g_Option.Freq == FREQ_50HZ)
@@ -966,21 +1026,28 @@ const c8* MenuAction_Freq(u8 op, i8 value)
 }
 
 //-----------------------------------------------------------------------------
-// Callback to handle palette change
+// Menu callback to handle palette change
+//
+// Parameters:
+//   op    - Operation (from MENU_ACTION_xxx enum)
+//   value - Value associated to the operation (not used here)
+//
+// Returns:
+//   String to display next to the menu entry (or NULL)
 const c8* MenuAction_Palette(u8 op, i8 value)
 {
 	value;
-	if (g_VersionVDP == VDP_VERSION_TMS9918A)
+	if (g_VersionVDP == VDP_VERSION_TMS9918A) // Option can't be changed on MSX1
 		return "(FOR MSX2)";
 
 	switch (op)
 	{
 	case MENU_ACTION_SET:
-	case MENU_ACTION_INC:
+	case MENU_ACTION_INC: // Select next palette
 		g_Option.Palette = (g_Option.Palette + 1) % PAL_MAX;
 		g_Saved = FALSE;
 		break;
-	case MENU_ACTION_DEC:
+	case MENU_ACTION_DEC: // Select previous palette
 		g_Option.Palette = (g_Option.Palette + (PAL_MAX - 1)) % PAL_MAX;
 		g_Saved = FALSE;
 		break;
@@ -1003,7 +1070,14 @@ const c8* MenuAction_Palette(u8 op, i8 value)
 }
 
 //-----------------------------------------------------------------------------
-// Callback to handle music enabling/disabling
+// Menu callback to handle music enabling/disabling
+//
+// Parameters:
+//   op    - Operation (from MENU_ACTION_xxx enum)
+//   value - Value associated to the operation (not used here)
+//
+// Returns:
+//   String to display next to the menu entry (or NULL)
 const c8* MenuAction_Music(u8 op, i8 value)
 {
 	value;
@@ -1021,11 +1095,18 @@ const c8* MenuAction_Music(u8 op, i8 value)
 }
 
 //-----------------------------------------------------------------------------
-// Callback to handle otion save on RTC
+// Menu callback to handle otion save on RTC's SRAM
+//
+// Parameters:
+//   op    - Operation (from MENU_ACTION_xxx enum)
+//   value - Value associated to the operation (not used here)
+//
+// Returns:
+//   String to display next to the menu entry (or NULL)
 const c8* MenuAction_Save(u8 op, i8 value)
 {
 	value;
-	if (g_VersionVDP == VDP_VERSION_TMS9918A)
+	if (g_VersionVDP == VDP_VERSION_TMS9918A) // Option can't be used on MSX1
 		return "(FOR MSX2)";
 
 	switch (op)
@@ -1043,7 +1124,14 @@ const c8* MenuAction_Save(u8 op, i8 value)
 }
 
 //-----------------------------------------------------------------------------
-// Callback to reset options
+// Menu callallback to hadle options reset
+//
+// Parameters:
+//   op    - Operation (from MENU_ACTION_xxx enum)
+//   value - Value associated to the operation (not used here)
+//
+// Returns:
+//   String to display next to the menu entry (or NULL)
 const c8* MenuAction_Reset(u8 op, i8 value)
 {
 	value;
@@ -1065,11 +1153,14 @@ const c8* MenuAction_Reset(u8 op, i8 value)
 
 //-----------------------------------------------------------------------------
 // Handle change field rule
+//
+// Parameters:
+//   field - New field (0:left, 1:right)
 void Rules_ChangeField(u8 field)
 {
 	g_Field = field;
 	g_BounceNum = 0;
-	g_PassNum = 0;
+	g_DribbleNum = 0;
 	UpdateBallColor();
 }
 
@@ -1084,7 +1175,11 @@ void Rules_Init()
 }	
 
 //-----------------------------------------------------------------------------
-// Handle score rule
+// Handle score point rule
+//
+// Parameters:
+//   ply   - Player that score the point (0:left, 1:right)
+//   event - Event that cause the point (from SCORE_xxx enum)
 void Rules_Score(u8 ply, u8 event)
 {
 	g_Victorious = ply;
@@ -1105,7 +1200,7 @@ void Rules_Score(u8 ply, u8 event)
 }	
 
 //-----------------------------------------------------------------------------
-// Handle bounces rule
+// Handle ground bounces rule
 void Rules_Bounce()
 {
 	g_BounceNum++;
@@ -1116,12 +1211,12 @@ void Rules_Bounce()
 }
 
 //-----------------------------------------------------------------------------
-// Handle pass rule
-void Rules_Pass()
+// Handle player bounces (dribble) rule
+void Rules_Dribble()
 {
-	g_PassNum++;
-	if ((g_Option.Rule.MaxPass != 0) && (g_PassNum > g_Option.Rule.MaxPass))
-		Rules_Score(1 - g_Field, SCORE_PASS);
+	g_DribbleNum++;
+	if ((g_Option.Rule.MaxDribble != 0) && (g_DribbleNum > g_Option.Rule.MaxDribble))
+		Rules_Score(1 - g_Field, SCORE_DRIBBLE);
 	g_LastTouch = g_Field;
 	UpdateBallColor();
 }
@@ -1138,14 +1233,18 @@ void Rules_Out()
 //-----------------------------------------------------------------------------
 
 //-----------------------------------------------------------------------------
-// Physics hnadle for player
-void PlayerPhysics(u8 event, struct Character* ply)
+// Physics handler callback for player
+//
+// Parameters:
+//   event - Triggered event (from PAWN_PHYSICS_xxx enum)
+//   ply   - Pointer to the player structure
+void PlayerPhysics(u8 event, Character* ply)
 {
 	switch (event)
 	{
 	case PAWN_PHYSICS_BORDER_DOWN: // Handle downward collisions 
 	case PAWN_PHYSICS_COL_DOWN:
-		if (ply->bInAir)
+		if (ply->bInAir) // Just landed
 		{
 			ply->bInAir = FALSE;
 			PlaySFX(SFX_LAND, ply->ID, 0x0C);
@@ -1153,7 +1252,7 @@ void PlayerPhysics(u8 event, struct Character* ply)
 		break;
 
 	case PAWN_PHYSICS_FALL: // Handle falling
-		if (!ply->bInAir)
+		if (!ply->bInAir) // Just falling
 		{
 			ply->bInAir = TRUE;
 			ply->VelocityY = 0;
@@ -1163,7 +1262,11 @@ void PlayerPhysics(u8 event, struct Character* ply)
 }
 
 //-----------------------------------------------------------------------------
-// Physics callback
+// Physics callback registred for player 1's pawn
+//
+// Parameters:
+//   event - Triggered event (from PAWN_PHYSICS_xxx enum)
+//   tile  - Pattern index of the collided tile
 void PhysicsEventPlayer1(u8 event, u8 tile)
 {
 	tile;
@@ -1171,7 +1274,11 @@ void PhysicsEventPlayer1(u8 event, u8 tile)
 }
 
 //-----------------------------------------------------------------------------
-// Physics callback
+// Physics callback registred for player 2's pawn
+//
+// Parameters:
+//   event - Triggered event (from PAWN_PHYSICS_xxx enum)
+//   tile  - Pattern index of the collided tile
 void PhysicsEventPlayer2(u8 event, u8 tile)
 {
 	tile;
@@ -1179,7 +1286,11 @@ void PhysicsEventPlayer2(u8 event, u8 tile)
 }
 
 //-----------------------------------------------------------------------------
-// Physics callback
+// Physics callback registred for ball's pawn
+//
+// Parameters:
+//   event - Triggered event (from PAWN_PHYSICS_xxx enum)
+//   tile  - Pattern index of the collided tile
 void PhysicsEventBall(u8 event, u8 tile)
 {
 	tile;
@@ -1188,43 +1299,38 @@ void PhysicsEventBall(u8 event, u8 tile)
 	case PAWN_PHYSICS_BORDER_DOWN: // Handle downward collisions 
 	case PAWN_PHYSICS_COL_DOWN:
 		PlaySFX(SFX_BUMP2, ARKOS_CHANNEL_C, ((g_Ball.VelocityY >> 3) & 0x03) + 11); // Make bounce volume depend on vertical velocity
-		g_Ball.VelocityY *= -1; // Reverse
+		g_Ball.VelocityY *= -1; // Reverse vertical velocity (for a bouncy effect)
 		Pawn_SetAction(&g_Ball.Pawn, ACTION_BALL_BUMP);
-		if (g_Ball.Pawn.PositionY > 140)
+		if (g_Ball.Pawn.PositionY > 140) // Only count bounce if ball hit the ground
 			Rules_Bounce();
 		break;
 
 	case PAWN_PHYSICS_COL_RIGHT: // Handle net
 	case PAWN_PHYSICS_COL_LEFT:
-		g_Ball.VelocityX *= -1;
+		g_Ball.VelocityX *= -1; // Horizontal bounce
 		break;
 	
 	case PAWN_PHYSICS_BORDER_RIGHT: // Handle border
 	case PAWN_PHYSICS_BORDER_LEFT:
-		Rules_Out();
+		Rules_Out(); // Check point scoring
 		break;
 
 	case PAWN_PHYSICS_FALL: // Handle falling
-		// if (!g_Ball.bInAir)
-		// {
-		// 	g_Ball.bInAir = TRUE;
-		// 	g_Ball.VelocityY = 0;
-		// }
 		break;
 	};
 }
 
 //-----------------------------------------------------------------------------
-// Collision callback
+// Collision callback registred for all pawns
 //
 // Parameters:
-//   tile - Number o the tile to check
+//   tile - Index of the tile to check
 //
 // Return:
 //   TRUE if the tile is a blocker, FALSE otherwise
 bool PhysicsCollision(u8 tile)
 {
-	return tile;
+	return tile; // Any non-zero tile index is a blocker
 }
 
 //-----------------------------------------------------------------------------
@@ -1232,8 +1338,11 @@ bool PhysicsCollision(u8 tile)
 //-----------------------------------------------------------------------------
 
 //-----------------------------------------------------------------------------
-// Check key press
-bool PressKey()
+// Check if any trigger key is pressed (keyboard space bar or joysticks button A)
+//
+// Return:
+//   TRUE if the trigger is pressed, FALSE otherwise
+bool TriggerPressed()
 {
 	if (Keyboard_IsKeyPressed(KEY_SPACE))
 		return TRUE;
@@ -1247,9 +1356,11 @@ bool PressKey()
 	return FALSE;
 }
 
-
 //-----------------------------------------------------------------------------
 // Check keyboard configuration 1
+//
+// Return:
+//   Input state (bitfield of INPUT_xxx flags)
 u8 CheckKB1()
 {
 	u8 row3 = Keyboard_Read(3);
@@ -1265,6 +1376,9 @@ u8 CheckKB1()
 
 //-----------------------------------------------------------------------------
 // Check keyboard configuration 2
+//
+// Return:
+//   Input state (bitfield of INPUT_xxx flags)
 u8 CheckKB2()
 {
 	u8 row8 = Keyboard_Read(8);
@@ -1286,6 +1400,12 @@ u8 CheckKB2()
 
 //-----------------------------------------------------------------------------
 // Check joystick port
+//
+// Parameters:
+//   port - Joystick port to read (JOY_PORT_1 or JOY_PORT_2)
+//
+// Return:
+//   Input state (bitfield of INPUT_xxx flags)
 u8 CheckJoystick(u8 port)
 {
 	u8 joy = Joystick_Read(port);
@@ -1307,6 +1427,9 @@ u8 CheckJoystick(u8 port)
 
 //-----------------------------------------------------------------------------
 // Check joystick port 1
+//
+// Return:
+//   Input state (bitfield of INPUT_xxx flags)
 u8 CheckJoy1()
 {
 	return CheckJoystick(JOY_PORT_1);
@@ -1314,13 +1437,16 @@ u8 CheckJoy1()
 
 //-----------------------------------------------------------------------------
 // Check joystick port 2
+//
+// Return:
+//   Input state (bitfield of INPUT_xxx flags)
 u8 CheckJoy2()
 {
 	return CheckJoystick(JOY_PORT_2);
 }
 
 //-----------------------------------------------------------------------------
-//
+// Ball hit ground X prediction for easy AI level
 u8 GetBallHitX_Easy()
 {
 	const Pawn* ballPawn = &g_Ball.Pawn;
@@ -1334,7 +1460,7 @@ u8 GetBallHitX_Easy()
 }
 
 //-----------------------------------------------------------------------------
-//
+// Ball hit ground X prediction for medium AI level
 u8 GetBallHitX_Medium()
 {
 	const Pawn* ballPawn = &g_Ball.Pawn;
@@ -1348,7 +1474,7 @@ u8 GetBallHitX_Medium()
 }
 
 //-----------------------------------------------------------------------------
-//
+// Ball hit ground X prediction for hard AI level
 u8 GetBallHitX_Hard()
 {
 	const Pawn* ballPawn = &g_Ball.Pawn;
@@ -1373,7 +1499,10 @@ u8 GetBallHitX_Hard()
 }
 
 //-----------------------------------------------------------------------------
+// Check for AI input (special input check function for AI player)
 //
+// Return:
+//   Input state (bitfield of INPUT_xxx flags)
 u8 CheckAI()
 {
 	const Pawn* ballPawn = &g_Ball.Pawn;
@@ -1454,13 +1583,13 @@ u8 CheckAI()
 // Apply palette option (for MSX2)
 void ApplyPaletteOption()
 {
-	if (g_VersionVDP == VDP_VERSION_TMS9918A)
+	if (g_VersionVDP == VDP_VERSION_TMS9918A) // Only for MSX2 or above
 		return;
 
 	switch (g_Option.Palette)
 	{
 	case PAL_CUSTOM:
-		VDP_SetPalette((u8*)g_CustomPalette);
+		VDP_SetPalette((u8*)g_CustomPalette); // Alternative MSX palette tweaked for the game
 		return;
 	case PAL_MSX1: 
 		VDP_SetMSX1Palette();
@@ -1505,22 +1634,33 @@ void ApplyMusicOption()
 }	
 
 //-----------------------------------------------------------------------------
-// Initialize sprite according to sprite model
+// Initialize sprite according to sprite model (SM1 or SM2)
+//
+// Parameters:
+//   idx   - Sprite index (0-31)
+//   x     - Sprite X coordinate
+//   y     - Sprite Y coordinate
+//   shape - Sprite shape (pattern index)
+//   color - Sprite color
 void SetSprite(u8 idx, u8 x, u8 y, u8 shape, u8 color)
 {
-	if (g_VersionVDP == VDP_VERSION_TMS9918A)
+	if (g_VersionVDP == VDP_VERSION_TMS9918A) // Sprite Mode 1
 		VDP_SetSpriteSM1(idx, x, y, shape, color);
-	else
+	else // Sprite Mode 2
 		VDP_SetSpriteExUniColor(idx, x, y, shape, color);
 }
 
 //-----------------------------------------------------------------------------
 // Set sprite color
+//
+// Parameters:
+//   idx   - Sprite index (0-31)
+//   color - Sprite color
 void SetSpriteColor(u8 idx, u8 color)
 {
-	if (g_VersionVDP == VDP_VERSION_TMS9918A)
+	if (g_VersionVDP == VDP_VERSION_TMS9918A) // Sprite Mode 1
 		VDP_SetSpriteColorSM1(idx, color);
-	else
+	else // Sprite Mode 2
 		VDP_SetSpriteUniColor(idx, color);
 }
 
@@ -1542,13 +1682,16 @@ void DrawScore()
 
 //-----------------------------------------------------------------------------
 // Draw point info
+//
+// Parameters:
+//   event - Event that cause the point (from SCORE_xxx enum)
 void DrawInfo(u8 event)
 {
 	Print_SetPatternOffset(128);
 	switch (event)
 	{
 	case SCORE_OUT:
-		if (g_PassNum == 0)
+		if (g_DribbleNum == 0)
 		{
 			if (g_BounceNum == 0)
 				Print_DrawTextAt(14, 15, "OUT!");
@@ -1559,7 +1702,7 @@ void DrawInfo(u8 event)
 		}
 		return;
 	case SCORE_BOUNCE:
-	case SCORE_PASS:
+	case SCORE_DRIBBLE:
 		Print_DrawTextAt(13, 15, "FAULT!");
 		return;
 	}
@@ -1576,13 +1719,17 @@ void ClearInfo()
 
 //-----------------------------------------------------------------------------
 // Load in all 3 screen sections
+//
+// Parameters:
+//   src - Pointer to the source GM2 data
+//   dst - Destination VRAM address
 void Pletter_LoadGM2(const u8* src, u16 dst)
 {
-	Pletter_UnpackToVRAM(src, dst);
+	Pletter_UnpackToVRAM(src, dst); // Upper part of the screen
 	dst += 0x800;
-	Pletter_UnpackToVRAM(src, dst);
+	Pletter_UnpackToVRAM(src, dst); // Middle part of the screen
 	dst += 0x800;
-	Pletter_UnpackToVRAM(src, dst);
+	Pletter_UnpackToVRAM(src, dst); // Lower part of the screen
 }
 
 //-----------------------------------------------------------------------------
@@ -1607,6 +1754,9 @@ void CollisionInit()
 
 //-----------------------------------------------------------------------------
 // Draw level background
+//
+// Parameters:
+//   bTitle - TRUE to draw title screen, FALSE to draw game level
 void DrawLevel(bool bTitle)
 {
 	// Background
@@ -1616,9 +1766,8 @@ void DrawLevel(bool bTitle)
 	// VDP_FillVRAM_16K(0x01, VDP_GetLayoutTable(), 32);
 }
 
-
 //-----------------------------------------------------------------------------
-// Save options to RTC
+// Save options to RTC (pack option structure into a byte array)
 void SaveOptions()
 {
 	// Byte #0
@@ -1635,19 +1784,19 @@ void SaveOptions()
 	g_SaveData[1] |= (g_Option.AILevel     & 0x03) << 6; // 0b11000000
 
 	// Byte #2
-	g_SaveData[2] = g_Option.Freq & 0x03;                // 0b00000011
+	g_SaveData[2] = g_Option.Freq & 0x03;       // 0b00000011
 
 	// Bytes #3-5
 	g_SaveData[3] = g_Option.Rule.GamePoints;   // 0b00111111
 	g_SaveData[4] = g_Option.Rule.MaxBounce;    // 0b00001111
-	g_SaveData[5] = g_Option.Rule.MaxPass;      // 0b00001111
+	g_SaveData[5] = g_Option.Rule.MaxDribble;   // 0b00001111
 
 	RTC_SaveDataSigned(g_SaveData);
 	g_Saved = TRUE;
 }
 
 //-----------------------------------------------------------------------------
-// Load options from RTC
+// Load options from RTC (unpack options)
 void LoadOptions()
 {
 	RTC_SetMode(RTC_MODE_BLOCK_3);
@@ -1676,7 +1825,7 @@ void LoadOptions()
 	// Bytes #3-5
 	g_Option.Rule.GamePoints = g_SaveData[3];
 	g_Option.Rule.MaxBounce  = g_SaveData[4];
-	g_Option.Rule.MaxPass    = g_SaveData[5];
+	g_Option.Rule.MaxDribble = g_SaveData[5];
 
 	g_Saved = TRUE;
 }
@@ -1685,7 +1834,7 @@ void LoadOptions()
 // Reset options
 void ResetOptions()
 {
-	Mem_Copy((u8*)&g_OptionDefault, (u8*)&g_Option, sizeof(struct Option));
+	Mem_Copy((u8*)&g_OptionDefault, (u8*)&g_Option, sizeof(Option));
 	ApplyFreqOption();
 	ApplyPaletteOption();
 	ApplyMusicOption();
@@ -1697,10 +1846,13 @@ void ResetOptions()
 //-----------------------------------------------------------------------------
 
 //-----------------------------------------------------------------------------
-// Initialize player
+// Initialize player position
+//
+// Parameters:
+//   id - Player ID (0:left, 1:right)
 void InitPlayerPosition(u8 id)
 {
-	struct Character* ply = &g_Player[id];
+	Character* ply = &g_Player[id];
 	Pawn* pawn = &ply->Pawn;
 	#if (1)
 	if (id == 0)
@@ -1717,10 +1869,13 @@ void InitPlayerPosition(u8 id)
 
 //-----------------------------------------------------------------------------
 // Initialize player
+//
+// Parameters:
+//   id - Player ID (0:left, 1:right)
 void InitPlayer(u8 id)
 {
-	struct Character* ply = &g_Player[id];
-	Mem_Set(0, ply, sizeof(struct Character)); // Set all paramters to 0
+	Character* ply = &g_Player[id];
+	Mem_Set(0, ply, sizeof(Character)); // Set all paramters to 0
 
 	ply->ID = id;
 	Pawn* pawn = &ply->Pawn;
@@ -1749,7 +1904,10 @@ void InitPlayer(u8 id)
 
 //-----------------------------------------------------------------------------
 // Update character gameplay and display
-void UpdateCharacter(struct Character* ply)
+//
+// Parameters:
+//   ply - Pointer to the character structure
+void UpdateCharacter(Character* ply)
 {
 	Pawn* pawn = &ply->Pawn;
 
@@ -1778,7 +1936,10 @@ void UpdateCharacter(struct Character* ply)
 
 //-----------------------------------------------------------------------------
 // Update player gameplay and display
-void UpdatePlayer(struct Character* ply)
+//
+// Parameters:
+//   ply - Pointer to the player structure
+void UpdatePlayer(Character* ply)
 {
 	// HORIZONTAL MOVEMENT
 
@@ -1864,7 +2025,7 @@ void InitBallPosition()
 // Initialize ball structure
 void InitBall()
 {
-	Mem_Set(0, &g_Ball, sizeof(struct Character));
+	Mem_Set(0, &g_Ball, sizeof(Character));
 	
 	Pawn* pawn = &g_Ball.Pawn;
 	Pawn_Initialize(pawn, g_BallLayers, numberof(g_BallLayers), 6, g_BallActions);
@@ -1885,8 +2046,8 @@ void UpdateBallColor()
 		return;
 
 	bool bWarning = (g_BounceNum >= g_Option.Rule.MaxBounce);
-	if (g_Option.Rule.MaxPass != 0)
-		bWarning |= (g_PassNum >= g_Option.Rule.MaxPass - 1);
+	if (g_Option.Rule.MaxDribble != 0)
+		bWarning |= (g_DribbleNum >= g_Option.Rule.MaxDribble - 1);
 
 	if (bWarning)
 	{
@@ -1911,7 +2072,7 @@ void UpdateBall()
 
 	// Select the player to tests
 	Pawn* ballPawn = &g_Ball.Pawn;
-	struct Character* ply = (ballPawn->PositionX < 128 - 8) ? &g_Player[0] : &g_Player[1];
+	Character* ply = (ballPawn->PositionX < 128 - 8) ? &g_Player[0] : &g_Player[1];
 
 	// Compute distance
 	Pawn* plyPawn = &ply->Pawn;
@@ -1925,7 +2086,7 @@ void UpdateBall()
 		{
 			g_BallHit = TRUE;
 			PlaySFX(SFX_BUMP2, ARKOS_CHANNEL_C, 0x0E);
-			Rules_Pass();
+			Rules_Dribble();
 		}
 
 		g_Ball.VelocityX = dx * 2;
@@ -1992,7 +2153,7 @@ void InitClouds()
 	// Initialize cloud sprites
 	loop(id, numberof(g_Cloud))
 	{
-		const struct Cloud* cloud = &g_Cloud[id];
+		const Cloud* cloud = &g_Cloud[id];
 	
 		u8 sprt = cloud->Sprite;
 		u8 pat = cloud->Pattern;
@@ -2009,7 +2170,7 @@ void UpdateClouds()
 	u8 frame = Game_GetFrameCount();
 	loop(id, numberof(g_Cloud))
 	{
-		const struct Cloud* cloud = &g_Cloud[id];
+		const Cloud* cloud = &g_Cloud[id];
 
 		if ((frame & cloud->Mask) != 0)
 			continue;
@@ -2041,17 +2202,21 @@ void UpdateClouds()
 // STATES
 //-----------------------------------------------------------------------------
 
-// Game initialization state
+//-----------------------------------------------------------------------------
+// Game startup state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_AppInit()
 {
 	Bios_SetKeyClick(FALSE);
 
-	Mem_Copy((u8*)&g_OptionDefault, (u8*)&g_Option, sizeof(struct Option)); // Set default options
+	Mem_Copy((u8*)&g_OptionDefault, (u8*)&g_Option, sizeof(Option)); // Set default options
 
 	// Get VDP version
-	if (Keyboard_IsKeyPressed(KEY_1))
+	if (Keyboard_IsKeyPressed(KEY_1)) // Force MSX1 mode if key '1' is pressed at startup
 		g_VersionVDP = VDP_VERSION_TMS9918A;
-	else if (Keyboard_IsKeyPressed(KEY_2))
+	else if (Keyboard_IsKeyPressed(KEY_2)) // Force MSX2 mode if key '2' is pressed at startup
 		g_VersionVDP = VDP_VERSION_V9938;
 	else
 		g_VersionVDP = VDP_GetVersion();
@@ -2091,6 +2256,9 @@ bool State_AppInit()
 
 //-----------------------------------------------------------------------------
 // Logo initialization state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_LogoInit()
 {
 	Logo_Initialize();
@@ -2100,13 +2268,16 @@ bool State_LogoInit()
 
 //-----------------------------------------------------------------------------
 // Logo update state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_LogoUpdate()
 {
 	Halt();
 
 	bool bFinish = Logo_Update();
 
-	if (bFinish || PressKey())
+	if (bFinish || TriggerPressed())
 		Game_SetState(State_MenuInit);
 
 	return TRUE;
@@ -2114,6 +2285,9 @@ bool State_LogoUpdate()
 
 //-----------------------------------------------------------------------------
 // Menu initialization state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_MenuInit()
 {
 	// Initialize display
@@ -2175,6 +2349,9 @@ bool State_MenuInit()
 
 //-----------------------------------------------------------------------------
 // Menu update state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_MenuUpdate()
 {
 	// Update menu
@@ -2186,6 +2363,9 @@ bool State_MenuUpdate()
 
 //-----------------------------------------------------------------------------
 // Data initialization state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_GameInit()
 {
 	// Initialize display
@@ -2257,6 +2437,9 @@ bool State_GameInit()
 
 //-----------------------------------------------------------------------------
 // Kick-off state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_KickOff()
 {
 	// Init player 1 pawn (left)
@@ -2277,6 +2460,9 @@ bool State_KickOff()
 
 //-----------------------------------------------------------------------------
 // Game update state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_Game()
 {
 // VDP_SetColor(COLOR_DARK_RED);
@@ -2308,6 +2494,9 @@ bool State_Game()
 
 //-----------------------------------------------------------------------------
 // Pause state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_Pause()
 {
 	Game_SetState(State_Game);
@@ -2316,6 +2505,9 @@ bool State_Pause()
 
 //-----------------------------------------------------------------------------
 // Point won state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_Point()
 {
 	Pawn_SetDirty(&g_Ball.Pawn);
@@ -2331,7 +2523,7 @@ bool State_Point()
 	UpdateClouds();
 
 	g_StateTimer--;
-	if ((g_StateTimer == 0) || PressKey())
+	if ((g_StateTimer == 0) || TriggerPressed())
 	{
 		ClearInfo();
 		VDP_SetColor(COLOR_BLACK);
@@ -2344,6 +2536,9 @@ bool State_Point()
 
 //-----------------------------------------------------------------------------
 // Victory scene initialization state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_VictoryInit()
 {
 	g_StateTimer = 500;
@@ -2374,6 +2569,9 @@ bool State_VictoryInit()
 
 //-----------------------------------------------------------------------------
 // Victory scene update state
+//
+// Return:
+//   TRUE if frame is finished, FALSE to continue processing
 bool State_VictoryUpdate()
 {
 	Pawn_SetDirty(&g_Player[0].Pawn);
