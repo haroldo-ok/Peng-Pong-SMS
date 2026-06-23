@@ -1,2658 +1,1240 @@
-// ____________________________
-// ██▀▀█▀▀██▀▀▀▀▀▀▀█▀▀█        │   ▄▄▄                ▄▄
-// ██  ▀  █▄  ▀██▄ ▀ ▄█ ▄▀▀ █  │  ▀█▄  ▄▀██ ▄█▄█ ██▀▄ ██  ▄███
-// █  █ █  ▀▀  ▄█  █  █ ▀▄█ █▄ │  ▄▄█▀ ▀▄██ ██ █ ██▀  ▀█▄ ▀█▄▄
-// ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀────────┘                 ▀▀
-//  Example game
-//─────────────────────────────────────────────────────────────────────────────
+/* ============================================================
+   PengPong — Sega Master System port
+   Original MSX game by Aoineko / Pixel Phenix (2025) under CC BY-SA
+   Sprites by GrafxKid (CC-BY), Graphics by Yaz, Music by Makoto
+   SMS port using devkitSMS (sverx) — retains full original game logic
+   ============================================================ */
 
-//=============================================================================
-// INCLUDES
-//=============================================================================
+#include "SMSlib.h"
+#include "gfx_data.h"
 
-// MSXgl
-#include "msxgl.h"
-#include "game/state.h"
-#include "game/pawn.h"
-#include "game/menu.h"
-#include "clock.h"
-#include "math.h"
-#include "string.h"
-#include "fixed_point.h"
-#include "version.h"
-#include "compress/pletter.h"
-#include "arkos/akm_player.h"
+#ifndef NULL
+#define NULL 0
+#endif
 
-// Lib
-#include "lib/phenix.h"
+/* ---- ROM header ---- */
+SMS_EMBED_SEGA_ROM_HEADER(0, 0);
+SMS_EMBED_SDSC_HEADER_AUTO_DATE(1, 0,
+    "Pixel Phenix", "PengPong SMS", "Volleyball penguin game. SMS port.");
 
-//=============================================================================
-// DEFINES
-//=============================================================================
+/* ============================================================
+   TYPE DEFINITIONS  (identical to MSXgl types)
+   ============================================================ */
+typedef unsigned char  u8;
+typedef unsigned int   u16;
+typedef signed char    i8;
+typedef signed int     i16;
+typedef unsigned char  bool;
+#define TRUE  1
+#define FALSE 0
 
-// Fixed point format
-//
-// Format	Prec.	Min		Max
-//-----------------------------------
-// Q4.4		0.06	-8		7.94
-// Q12.4	0.06	-2048	2047.94
+/* ============================================================
+   FIXED-POINT Q4.4 HELPERS  (identical to MSX original)
+   ============================================================ */
+#define Q4_4_SET(f)   ((i8)((f) * 16.0f))
+#define Q4_4_GET(v)   ((i8)((i8)(v) >> 4))
+#define Q4_4_FRAC(v)  ((i8)((v) & 0x0F))
 
-#define GAME_VERSION				"1.1"
+/* ============================================================
+   GAME-PLAY CONSTANTS  (identical to MSX original)
+   ============================================================ */
+#define BALL_GRAVITY    Q4_4_SET(0.15f)   /* gravity on ball               */
+#define FALL_MAX_SPEED  Q4_4_SET(3.0f)    /* max fall speed                */
+#define GRAVITY         Q4_4_SET(0.2f)    /* gravity on player             */
+#define JUMP_FORCE      Q4_4_SET(-3.0f)   /* player jump impulse           */
+#define MOVE_ACCEL      Q4_4_SET(0.33f)   /* horizontal acceleration       */
+#define MOVE_MAX_SPEED  Q4_4_SET(1.5f)    /* max horizontal speed          */
+#define COL_DIST        16                 /* ball–player collision radius  */
+#define GROUND_Y        168                /* y at which characters rest    */
+#define BALL_GROUND_Y   140                /* y threshold to count bounce   */
+#define NET_X_LEFT      120                /* net left pixel edge           */
+#define NET_X_RIGHT     136                /* net right pixel edge          */
+#define NET_TOP_Y       128                /* net top pixel y               */
+#define SCREEN_W        256
+#define SCREEN_H        192
+#define SCORE_MAX       11                 /* default points to win         */
 
-// Gameplay value
-#define BALL_GRAVITY				Q4_4_SET(0.15f)		// Gravity apply to ball
-#define FALL_MAX_SPEED				Q4_4_SET(3.0f)		// Ball max fall speed
-#define GRAVITY						Q4_4_SET(0.2f)		// Gravity apply to player
-#define JUMP_FORCE					Q4_4_SET(-3.0f)		// Player jump force
-#define MOVE_FRICTION				Q4_4_SET(0.1f)		// Player friction with ground
-#define MOVE_ACCEL					Q4_4_SET(0.33f)		// Player acceleration
-#define MOVE_MAX_SPEED				Q4_4_SET(1.5f)		// Player max speed
-#define COL_DIST					16					// Player vs ball collision distance
-#define SHADOW_COLOR				COLOR_LIGHT_BLUE	// Color of the shadow sprite
+/* ============================================================
+   INPUT  (maps MSX INPUT_xxx → SMS joypad bits)
+   ============================================================ */
+#define INPUT_NONE    0x00
+#define INPUT_LEFT    0x01
+#define INPUT_RIGHT   0x02
+#define INPUT_UP      0x04
+#define INPUT_DOWN    0x08
+#define INPUT_ACTION  0x10   /* jump or serve */
 
-// Background
-#define HORIZON_H					11					// Horizon height in tiles
-#define NET_H						7					// Net height in tiles
+/* ============================================================
+   PLAYER ACTIONS  (same as MSX)
+   ============================================================ */
+#define ACTION_IDLE   0
+#define ACTION_MOVE   1
+#define ACTION_JUMP   2
+#define ACTION_FALL   3
+#define ACTION_HIT    4
+#define ACTION_WIN    5
+#define ACTION_LOOSE  6
 
-// VRAM Tables Address
-#define VRAM_PATTERN_TABLE			0x0000				// Address of the pattern generator table (PGT)
-#define VRAM_COLOR_TABLE			0x2000				// Address of the pattern color table (PCT)
-#define VRAM_LAYOUT_TABLE			0x3800				// Address of the pattern name table (PNT)
-#define VRAM_SPRITE_PATTERN			0x1800				// Address of the sprite pattern table (SPT)
-#define VRAM_SPRITE_ATTRIBUTE		0x3E00				// Address of the sprite attribute table (SAT)
+/* ============================================================
+   ANIMATION FRAME TABLE
+   Maps action → MSX animation-frame indices (same as original Pawn data)
+   Each entry is {frame_idx, duration} — frame_idx × 4 = sprite tile offset
+   ============================================================ */
+typedef struct { u8 frame; u8 dur; } AnimKey;
+typedef struct { const AnimKey *keys; u8 n; u8 loop; } AnimDef;
 
-// Audio buffers
-#define SFX_ADDRESS					0xE000				// Address in RAM where SFX are unpacked
-#define MUSIC_ADDRESS				0xE800				// Address in RAM where music is unpacked
+static const AnimKey g_animIdle[] = { {6,64},{7,24} };
+static const AnimKey g_animMove[] = { {0,4},{1,4},{2,4},{3,4} };
+static const AnimKey g_animJump[] = { {8,4},{3,4} };
+static const AnimKey g_animFall[] = { {9,4} };
+static const AnimKey g_animHit[]  = { {12,12} };
+static const AnimKey g_animWin[]  = { {14,25},{15,25} };
+static const AnimKey g_animLost[] = { {13,4} };
 
-// Index of all menu pages
-enum MENU_PAGES
-{
-	MENU_MAIN = 0, // Main page
-	MENU_VERSUS,   // Start page
-	MENU_SOLO,     // Start page
-	MENU_RULES,    // Rules page
-	MENU_OPTION,   // Options page
-	MENU_AUDIO,    // Audio options page
-	MENU_GRAPH,    // Graphical options page
-	MENU_CREDITS1, // Credits page
-	MENU_CREDITS2, // Infos page
-//.............................
-	MENU_MAX,
+static const AnimDef g_anims[] = {
+    { g_animIdle, 2, 1 },  /* ACTION_IDLE  */
+    { g_animMove, 4, 1 },  /* ACTION_MOVE  */
+    { g_animJump, 2, 1 },  /* ACTION_JUMP  */
+    { g_animFall, 1, 1 },  /* ACTION_FALL  */
+    { g_animHit,  1, 0 },  /* ACTION_HIT   */
+    { g_animWin,  2, 1 },  /* ACTION_WIN   */
+    { g_animLost, 1, 1 },  /* ACTION_LOOSE */
 };
 
-// Input set enumeration
-enum INPUT_SET
-{
-	INPUT_SET_KB1 = 0, // Keyboard set 1 (DFG)
-	INPUT_SET_KB2,     // Keyboard set 2 (arrow keys)
-	INPUT_SET_JOY1,    // Joystick in port 1
-	INPUT_SET_JOY2,    // Joystick in port 2
-//.............................
-	INPUT_SET_MAX,
+static const AnimKey g_ballAnimIdle[] = { {0,4} };
+static const AnimKey g_ballAnimBump[] = { {1,1},{2,5},{1,2} };
+static const AnimDef g_ballAnims[]    = {
+    { g_ballAnimIdle, 1, 1 },
+    { g_ballAnimBump, 3, 0 },
 };
 
-// Input action flag
-enum INPUT_ACTION
-{
-	INPUT_NONE    = 0,
-	INPUT_UP      = 0b00000001,
-	INPUT_DOWN    = 0b00000010,
-	INPUT_LEFT    = 0b00000100,
-	INPUT_RIGHT   = 0b00001000,
-	INPUT_BUTTON1 = 0b00010000,
-	INPUT_BUTTON2 = 0b00100000,
-	INPUT_ACTION  = 0b01000000,
-	INPUT_7       = 0b10000000,
-};
-
-// Actions id
-enum ACTION_PLAYER_ID
-{
-	ACTION_PLAYER_IDLE = 0, // Player is idle
-	ACTION_PLAYER_MOVE,     // Player is moving right or left
-	ACTION_PLAYER_JUMP,     // Player is jumping
-	ACTION_PLAYER_FALL,     // Player is falling
-	ACTION_PLAYER_HIT,      // Player hit the ball
-	ACTION_PLAYER_WIN,      // Player winning animation
-	ACTION_PLAYER_LOOSE,    // Player loosing animation
-//.............................
-	ACTION_PLAYER_MAX,
-};
-
-// Actions id
-enum ACTION_BALL_ID
-{
-	ACTION_BALL_IDLE = 0, // Ball is idle (moving in the air)
-	ACTION_BALL_BUMP,     // Ball hit the ground or a player
-//.............................
-	ACTION_BALL_MAX,
-};
-
-// Score type
-enum SCORE_ID
-{
-	SCORE_OUT = 0, // Ball go out without bounce or dribble
-	SCORE_BOUNCE,  // Ball bounce on the ground too many times
-	SCORE_DRIBBLE, // Player hit the ball too many times
-	//.............................
-	SCORE_MAX,
-};
-
-// AI level
-enum AI_LEVEL
-{
-	AI_EASY = 0,
-	AI_MEDIUM,
-	AI_HARD,
-//.............................
-	AI_MAX,
-};
-
-// Palette enumaration
-enum PAL_ID
-{
-	PAL_CUSTOM = 0,
-	PAL_MSX1,
-	PAL_MSX2,
-	PAL_GRAY,
-//.............................
-	PAL_MAX,
-};
-
-// Frequence enumaration
-enum FREQ_MODE
-{
-	FREQ_AUTO,							// Use auto-detected frequency
-	FREQ_60HZ,							// Force 60 Hz
-	FREQ_50HZ,							// Force 50 Hz
-//.............................
-	FREQ_MAX,
-};
-
-// Sprite index
-enum SPRITE_ID
-{
-	SPRITE_BALL_DARK,					// 0		Ball shadow
-	SPRITE_BALL_LIGHT,					// 1		Ball light
-	SPRITE_PLY1_BLACK,					// 2		Player 1 black
-	SPRITE_PLY2_BLACK,					// 3		Player 2 black
-	SPRITE_PLY1_RED,					// 4 		Player 1 red
-	SPRITE_PLY2_RED,					// 5		Player 2 red
-	SPRITE_WIN_BACK,					// 6		Winning pannel...
-	SPRITE_WIN_FRONT,					// 7
-	SPRITE_BALL_SHADOW,					// 8		Shadows...
-	SPRITE_PLY1_SHADOW,					// 9
-	SPRITE_PLY2_SHADOW,					// 10
-	SPRITE_HIT_MARKER,					// 11		Hit marker for debug
-	SPRITE_CLOUD,						// 12-27	Clouds...
-//.............................
-	SPRITE_MAX,
-};
-
-// Musics index
-enum MUSIC_ID
-{
-	MUSIC_EMPTY = 0,
-	MUSIC_MAIN,
-	MUSIC_VICTORY,
-//.............................
-	MUSIC_MAX,
-};
-
-// SFX index
-enum SFX_ID
-{
-	SFX_CLICK = 0,
-	SFX_BUMP,
-	SFX_JUMP,
-	SFX_BUMP2,
-	SFX_DING,
-	SFX_PUING,
-	SFX_CUICUI,
-	SFX_CUICUI2,
-	SFX_CLICK2,
-	SFX_TAC,
-	SFX_TIC,
-	SFX_SPEAK,
-	SFX_LAND,
-	SFX_DEBUG,
-	SFX_SEA,
-//.............................
-	SFX_MAX,
-};
-
-// Gameplay character stricture
-typedef struct Character
-{
-	u8			ID;        // Character ID (Player: Left=0, Right=1. Ball: 0)
-	bool		bFreeze;   // Freeze character (use for ball during serve)
-	bool		bMoving;   // Is character moving (for player)
-	bool		bInAir;    // Is character in the air (for player)
-	i8			VelocityX; // Horizontal velocity   Format Q4.4 [-8:7.94]
-	i8			VelocityY; // Vertical velociy      Format Q4.4 [-8:7.94]
-	i8			RestX;     // Horizontal move rest  Format Q4.4 [-8:7.94]
-	i8			RestY;     // Vertical move rest    Format Q4.4 [-8:7.94]
-	u8			Input;     // Current input state (for player)
-	u8			Score;     // Current score (for player)
-	Pawn		Pawn;      // Pawn structure
-	u8			Shadow;    // Shadow sprite index
+/* ============================================================
+   CHARACTER STRUCTURE
+   ============================================================ */
+typedef struct {
+    u8   id;           /* 0=left player, 1=right player           */
+    u8   pos_x;        /* pixel x position                        */
+    u8   pos_y;        /* pixel y position                        */
+    i8   vel_x;        /* Q4.4 horizontal velocity                */
+    i8   vel_y;        /* Q4.4 vertical velocity                  */
+    i8   rest_x;       /* Q4.4 fractional accumulator x          */
+    i8   rest_y;       /* Q4.4 fractional accumulator y          */
+    u8   score;        /* points scored                           */
+    u8   input;        /* current input bitfield                  */
+    bool in_air;       /* TRUE if not on ground                   */
+    bool moving;       /* TRUE if moving horizontally             */
+    bool freeze;       /* TRUE = don't update physics (ball serve)*/
+    /* Animation state */
+    u8   anim_action;  /* current ACTION_xxx                      */
+    u8   anim_key;     /* index into current action's key list    */
+    u8   anim_timer;   /* frames remaining for current key        */
+    u8   anim_frame;   /* resolved MSX frame index (0-15)         */
+    bool anim_done;    /* TRUE when non-looping anim finished     */
 } Character;
 
-// Gameplay rule structure
-typedef struct Rule
-{
-	u8			GamePoints; // Points to win a game
-	u8			MaxBounce;  // Max bounce on ground allowed
-	u8			MaxDribble; // Max bounce on player allowed
-} Rule;
-
-// Option data structure
-typedef struct Option
-{
-	bool		Music;				// 1
-	bool		SFX;				// 1
-	bool		Blend;				// 1		Color blending
-	bool		Feedback;			// 1		Ball rule feedback
-	u8			Freq;				// 2
-	u8			Palette;			// 3
-	u8   		InputSet[3];		// 3 x 2
-	u8			AILevel;			// 2		AI level for each player
-	Rule		Rule;				// 6 + 4
-} Option;
-
-// Cloud data structure
-typedef struct Cloud
-{
-	u8			X;       // Cloud sprite X coordinate
-	u8			Y;       // Cloud sprite Y coordinate
-	u8			Pattern; // Cloud sprite pattern index
-	u8			Sprite;  // Cloud sprite index
-	u8			Mask;    // Cloud sprite speed mask (for parallax effect)
-} Cloud;
-
-// Function signature for input check
-typedef u8 (*cbInputCheck)(void);
-
-// States prototype
-bool State_AppInit();
-bool State_LogoInit();
-bool State_LogoUpdate();
-bool State_MenuInit();
-bool State_MenuUpdate();
-bool State_GameInit();
-bool State_KickOff();
-bool State_Game();
-bool State_Pause();
-bool State_Point();
-bool State_VictoryInit();
-bool State_VictoryUpdate();
-
-// Functions prototype
-void DrawScore();
-void DrawInfo(u8 event);
-void UpdateBallColor();
-void SaveOptions();
-void LoadOptions();
-void ResetOptions();
-void SetSprite(u8 idx, u8 x, u8 y, u8 shape, u8 color);
-void SetSpriteColor(u8 idx, u8 color);
-
-// Menu function callback
-void ApplyPaletteOption();
-void ApplyFreqOption();
-void ApplyMusicOption();
-const c8* MenuAction_Start(u8 op, i8 value);
-const c8* MenuAction_Input(u8 op, i8 value);
-const c8* MenuAction_AI(u8 op, i8 value);
-const c8* MenuAction_Freq(u8 op, i8 value);
-const c8* MenuAction_Palette(u8 op, i8 value);
-const c8* MenuAction_Music(u8 op, i8 value);
-const c8* MenuAction_Save(u8 op, i8 value);
-const c8* MenuAction_Reset(u8 op, i8 value);
-
-// Input function callback
-u8 CheckKB1();
-u8 CheckKB2();
-u8 CheckJoy1();
-u8 CheckJoy2();
-u8 CheckAI();
-u8 GetBallHitX_Easy();
-u8 GetBallHitX_Medium();
-u8 GetBallHitX_Hard();
-
-//=============================================================================
-// READ-ONLY DATA
-//=============================================================================
-
-// Font by Ludo 'GFX'
-#include "content/data_font.h"
-
-// Sprites by GrafxKid (https://opengameart.org/content/super-random-sprites)
-#include "content/data_sprt_player.h"
-#include "content/data_sprt_ball.h"
-#include "content/data_sprt_extra.h"
-
-// Background by Yaz
-#include "content/data_bg2.h"
-
-// Audio data by Makoto
-#include "content/music_empty.h"
-#include "content/music_main.h"
-#include "content/music_victory.h"
-#include "content/sfx.h"
-
-//.............................................................................
-// Player 1 data
-
-// Player's sprite layers
-// This character is made of 3 colors: red for beak and feet, black for eyes and body and white for belly.
-// White color is not in a sprite but a "hole" that let see the background color (characters can't move outside white area).
-// Red color is a normal sprite layer.
-// Black color is a sprite layer with color blending enabled. This means that the black color sprite will be flickered quickly to create shaded colors.
-// The counterpart is the flickering effect.
-const Pawn_Sprite g_SpriteLayers[] =
-{
-//	  Sprite ID
-//    |                  X offset from pawn's position
-//    |                  |  Y offset
-//    |                  |  |  Pattern offset from current animation key
-//    |                  |  |  |  Layer's color
-//    |                  |  |  |  |                Layer option
-	{ SPRITE_PLY1_RED,   0, 0, 0, COLOR_LIGHT_RED, 0 },
-	{ SPRITE_PLY1_BLACK, 0, 0, 4, COLOR_BLACK,     PAWN_SPRITE_BLEND }, // Only visible on even frame number
-};
-
-// Idle animation frames
-// Each line describes an animation key
-const Pawn_Frame g_FramesIdle[] =
-{
-//	  Pattern offset of this animation key in the sprite data
-//    |     Animation key duration (in frame number)
-//    |     |   Event to trigger during this animation key (function pointer)
-	{ 6*12, 64, NULL },
-	{ 7*12, 24, NULL },
-};
-
-// Move animation frames
-const Pawn_Frame g_FramesMove[] =
-{
-	{ 0*12, 4, NULL },
-	{ 1*12, 4, NULL },
-	{ 2*12, 4, NULL },
-	{ 3*12, 4, NULL },
-};
-
-// Jump animation frames
-const Pawn_Frame g_FramesJump[] =
-{
-	{ 8*12, 4, NULL },
-	{ 3*12, 4, NULL },
-};
-
-// Fall animation frames
-const Pawn_Frame g_FramesFall[] =
-{
-	{ 9*12,	4, NULL },
-};
-
-// Animation when player hit the ball
-const Pawn_Frame g_FramesHit[] =
-{
-	{ 12*12, 12, NULL },
-};
-
-// Winning animation frames
-const Pawn_Frame g_FramesWin[] =
-{
-	{ 14*12, 25, NULL },
-	{ 15*12, 25, NULL },
-};
-
-// Loosing animation frames
-const Pawn_Frame g_FramesLost[] =
-{
-	{ 13*12, 4,	NULL },
-};
-
-// List of all player actions
-const Pawn_Action g_AnimActions[ACTION_PLAYER_MAX] =
-{ //  Frames        Number               Loop? Interrupt?
-	{ g_FramesIdle, numberof(g_FramesIdle), 1, 1 }, // ACTION_PLAYER_IDLE
-	{ g_FramesMove, numberof(g_FramesMove), 1, 1 }, // ACTION_PLAYER_MOVE
-	{ g_FramesJump, numberof(g_FramesJump), 1, 1 }, // ACTION_PLAYER_JUMP
-	{ g_FramesFall, numberof(g_FramesFall), 1, 1 }, // ACTION_PLAYER_FALL
-	{ g_FramesHit,  numberof(g_FramesHit),  0, 0 }, // ACTION_PLAYER_HIT
-	{ g_FramesWin,  numberof(g_FramesWin),  1, 0 }, // ACTION_PLAYER_WIN
-	{ g_FramesLost, numberof(g_FramesLost), 1, 0 }, // ACTION_PLAYER_LOOSE
-};
-
-//.............................................................................
-// Player 2 data
-
-// Pawn sprite layers
-const Pawn_Sprite g_SpriteLayers2[] =
-{
-	{ SPRITE_PLY2_RED,   0, 0, 0, COLOR_LIGHT_RED, 0 },
-	{ SPRITE_PLY2_BLACK, 0, 0, 4, COLOR_BLACK,     PAWN_SPRITE_BLEND },
-};
-
-// Note: No need to redefine animations, player 2 use the same as player 1
-
-//.............................................................................
-// Ball data
-
-// Pawn sprite layers
-const Pawn_Sprite g_BallLayers[] =
-{
-	{ SPRITE_BALL_DARK,  0, 0, 4, COLOR_MEDIUM_RED, 0 },
-	{ SPRITE_BALL_LIGHT, 0, 0, 0, COLOR_LIGHT_RED,  0 },
-};
-
-// Idle animation frames
-const Pawn_Frame g_BallIdle[] =
-{
-	{ 0*8,	4,	NULL },
-};
-
-// Bump animation frames
-const Pawn_Frame g_BallBump[] =
-{
-	{ 1*8,	1,	NULL },
-	{ 2*8,	5,	NULL },
-	{ 1*8,	2,	NULL },
-};
-
-// List of all ball actions
-const Pawn_Action g_BallActions[ACTION_BALL_MAX] =
-{ //  Frames      Number             Loop? Interrupt?
-	{ g_BallIdle, numberof(g_BallIdle), 1, 1 }, // ACTION_BALL_IDLE
-	{ g_BallBump, numberof(g_BallBump), 0, 0 }, // ACTION_BALL_BUMP
-};
-
-//.............................................................................
-
-// Clouds data
-const Cloud g_Cloud[] =
-{ //    X   Y   Pattern  Sprite number      Time mask
-	{  30,  8,  80 + 64, SPRITE_CLOUD + 0,  0b00000111 },
-	{  46,  8,  88 + 64, SPRITE_CLOUD + 2,  0b00000111 },
-	{ 140, 20,  96 + 64, SPRITE_CLOUD + 4,  0b00001111 },
-	{ 156, 20, 104 + 64, SPRITE_CLOUD + 6,  0b00001111 },
-	{   4, 30,  96 + 64, SPRITE_CLOUD + 8,  0b00011111 },
-	{  20, 30, 104 + 64, SPRITE_CLOUD + 10, 0b00011111 },
-	{ 124, 37, 112 + 64, SPRITE_CLOUD + 12, 0b00111111 },
-	{ 248, 38, 120 + 64, SPRITE_CLOUD + 14, 0b01111111 },
-};
-
-// Custom palette (for MSX2)
-const u16 g_CustomPalette[15] =
-{
-	RGB16(0, 0, 0), // black				RGB16(0, 0, 0),
-	RGB16(0, 4, 4), // medium green			RGB16(1, 5, 1),
-	RGB16(3, 5, 6), // light green			RGB16(3, 6, 3),
-	RGB16(2, 2, 6), // dark blue			RGB16(2, 2, 6),
-	RGB16(1, 3, 6), // light blue			RGB16(3, 3, 7),
-	RGB16(5, 2, 2), // dark red				RGB16(5, 2, 2),
-	RGB16(3, 5, 7), // *cyan				RGB16(2, 6, 7),
-	RGB16(6, 3, 3), // *medium red			RGB16(6, 2, 2),
-	RGB16(7, 4, 4), // *light red			RGB16(6, 3, 3),
-	RGB16(5, 5, 3), // *dark yellow			RGB16(5, 5, 2),
-	RGB16(6, 6, 4), // *light yellow		RGB16(6, 6, 3),
-	RGB16(2, 4, 5), // dark green			RGB16(1, 4, 1),
-	RGB16(5, 2, 4), // *magenta				RGB16(5, 2, 5),
-	RGB16(5, 5, 6), // gray					RGB16(5, 5, 5),
-	RGB16(7, 7, 7)  // white				RGB16(7, 7, 7) 
-};
-
-// Gray scale palette (for MSX2)
-const u16 g_GrayPalette[15] =
-{
-	RGB16(0, 0, 0), // black				RGB16(0, 0, 0),
-	RGB16(3, 3, 3), // medium green			RGB16(1, 5, 1),
-	RGB16(6, 6, 6), // light green			RGB16(3, 6, 3),
-	RGB16(2, 2, 2), // dark blue			RGB16(2, 2, 6),
-	RGB16(3, 3, 3), // light blue			RGB16(3, 3, 7),
-	RGB16(1, 1, 1), // dark red				RGB16(5, 2, 2),
-	RGB16(5, 5, 5), // *cyan				RGB16(2, 6, 7),
-	RGB16(3, 3, 3), // *medium red			RGB16(6, 2, 2),
-	RGB16(5, 5, 5), // *light red			RGB16(6, 3, 3),
-	RGB16(3, 3, 3), // *dark yellow			RGB16(5, 5, 2),
-	RGB16(6, 6, 6), // *light yellow		RGB16(6, 6, 3),
-	RGB16(1, 1, 1), // dark green			RGB16(1, 4, 1),
-	RGB16(3, 3, 3), // *magenta				RGB16(5, 2, 5),
-	RGB16(4, 4, 4), // gray					RGB16(5, 5, 5),
-	RGB16(7, 7, 7)  // white				RGB16(7, 7, 7) 
-};
-
-// Input set name (for menu display)
-const c8* g_InputSetName[INPUT_SET_MAX] =
-{
-	"DFG",
-	"\\]",
-	"[1",
-	"[2",
-};
-
-// List of input check functions
-const cbInputCheck g_InputCheck[INPUT_SET_MAX] = { CheckKB1, CheckKB2, CheckJoy1, CheckJoy2 };
-
-// GM2 font color (1 color per line)
-const u8 g_FontColorNormal[8] =
-{
-	COLOR_MERGE(COLOR_LIGHT_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_LIGHT_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_LIGHT_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_LIGHT_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_LIGHT_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_LIGHT_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_MEDIUM_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_MEDIUM_RED, COLOR_WHITE),
-};
-
-// GM2 alternative font color (1 color per line)
-const u8 g_FontColorSelect[8] =
-{
-	COLOR_MERGE(COLOR_LIGHT_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_MEDIUM_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_MEDIUM_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_MEDIUM_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_MEDIUM_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_MEDIUM_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_DARK_RED, COLOR_WHITE),
-	COLOR_MERGE(COLOR_DARK_RED, COLOR_WHITE),
-};
-
-// Shadows sprite pattern definition (upper line only)
-const u8 g_ShadowPattern[] =
-{
-	0b00111111, 0b11111111,
-	0b00000111, 0b11111110,
-	0b00000000, 0b11111100,
-};
-
-// Shadow pattern index according to Y position (in rows number)
-const u8 g_ShadowPatternId[24] =
-{ // 0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22  23
-	36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 36, 32, 32, 32, 32, 28, 28, 28, 24, 24, 24, 24
-};
-
-// List of all musics
-const u8 *const g_MusicTable[MUSIC_MAX] = { g_MusicEmpty, g_MusicMain, g_Musicvictory };
-
-// Default options
-const Option g_OptionDefault = { TRUE, TRUE, TRUE, TRUE, FREQ_AUTO, PAL_CUSTOM, { INPUT_SET_KB1, INPUT_SET_KB2, INPUT_SET_KB2 }, AI_MEDIUM, { 11, 1, 3 } };
-
-// AI reception position offset
-const i8 g_AIReceptOffset[] = { 8, 12, 16, 16, 16, 16, 16, 16 };
-
-//=============================================================================
-// MEMORY DATA
-//=============================================================================
-
-u16  g_StateTimer = 0;        // State specific timer (in frame number)
-u8   g_VersionVDP;            // Detected VDP version
-u8   g_FreqCurrent;           // Current frequency (FREQ_50HZ or FREQ_60HZ)
-u8   g_FreqDetected;          // Frequency detected from the Main-ROM or from the VDP (FREQ_50HZ or FREQ_60HZ)
-
-u8   g_SaveData[6];           // Save data buffer
-bool g_Saved = FALSE;         // Is options saved (no modification occurred since last save)?
-
-// Characters
-Character g_Player[2];        // Players data
-Character g_Ball;             // Ball data
-u8   g_CollisionMap[32*24];   // Collision tile map
-bool g_BallHit;               // Did ball hit a player during this frame?
-u8   g_BallGroundX;           // Prediction of ball X position when it will hit the ground
-
-i16  g_CloudX[numberof(g_Cloud)]; // Clound sprites X coordinate (can be negative for smooth transition)
-
-// AI
-bool g_AIGame;                 // Is one player controlled by AI?
-u8   g_AIWait;                 // Wait time before AI serve
-
-// Rules
-u8   g_Field = 0;              // Current field (0=left, 1=right)
-u8   g_BounceNum = 0;          // Number of bounce on ground during current point
-u8   g_DribbleNum = 0;         // Number of bounce on ball during current point
-u8   g_ChangeNum = 0;          // Number of time the ball change side during current point
-u8   g_LastTouch = 0;          // ID of the last player that hit the ball (0=left, 1=right)
-u8   g_Victorious = 0;         // ID of the player that win the game (0=left, 1=right)
-
-cbInputCheck g_InputCheck1;    // Current input check function for player 1
-cbInputCheck g_InputCheck2;    // Current input check function for player 2
-cbInputCheck g_AIPredict;      // Current AI prediction function (depending on AI level)
-u8 g_PrevInput = INPUT_NONE;   // Previous input state (for debouncing)
-
-// Audio
-u8   g_CurrentMusic = 0xFF;    // Current music index
-u8   g_NextMusic = 0xFF;       // Next music to play (0xFF = no change)
-u8   g_NextSFX[3] = { 0xFF, 0xFF, 0xFF }; // Next SFX to play on each channel (0xFF = no change)
-u8   g_NextSFXVol[3];          // Next SFX volume on each channel (0-15)
-
-// Options parameters
-Option g_Option;               // Current options
-
-//.............................................................................
-// Menu
-
-// Min/max structures used to bound integer menu entries
-const MenuItemMinMax g_MenuPointsMinMax  = { 1, 60, 1 };
-const MenuItemMinMax g_MenuBouncesMinMax = { 0, 10, 1 };
-
-// Entries description for the Main menu
-const MenuItem g_MenuMain[] =
-{
-//	  Text (name of the item)
-//    |             Type (type of the item; define the meaning of 'Action' and 'Value')
-//    |             |                 Action (action associated to the item: Callback, MinMax clamp, Pointer to variable)
-//    |             |                 |                 Value (value associated to the item)
-//    |             |                 |                 |
-	{ "PLY VS PLY", MENU_ITEM_GOTO,   NULL,             MENU_VERSUS },   // Open player vs player game menu. When type is MENU_ITEM_GOTO, 'Value' is the menu index to open
-	{ "PLY VS CPU", MENU_ITEM_GOTO,   NULL,             MENU_SOLO },     // Open player vs AI game menu
-	{ "OPTIONS",    MENU_ITEM_GOTO,   NULL,             MENU_OPTION },   // Open Option menu
-	{ "CREDITS",    MENU_ITEM_GOTO,   NULL,             MENU_CREDITS1 }, // Open Credits menu
-	#if ((TARGET == TARGET_BIN_DISK) || (TARGET == TARGET_BIN_TAPE) || (TARGET == TARGET_DOS1) || (TARGET == TARGET_DOS2))
-	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },             // Blank entry
-	{ "EXIT",       MENU_ITEM_ACTION, MenuAction_Start, 0 },             // Exit the game (only for BASIC or MSX-DOS environment)
-	#endif
-};
-
-// Entries description for the Versus menu
-const MenuItem g_MenuVersus[] =
-{ //  Entry text    Type              Action            Value
-	{ "START>",     MENU_ITEM_ACTION, MenuAction_Start, 1 },          // Start a versus game. When type is MENU_ITEM_ACTION, 'Action' is a callback and 'Value' is a value passed to the callback
-	{ "PLAYER 1",   MENU_ITEM_ACTION, MenuAction_Input, 0 },          // Change player 1 input set
-	{ "PLAYER 2",   MENU_ITEM_ACTION, MenuAction_Input, 1 },          // Change player 2 input set
-	{ "RULES>",     MENU_ITEM_GOTO,   NULL,             MENU_RULES }, // Open Rules menu
-	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },          // Blank entry
-	{ "BACK",       MENU_ITEM_GOTO,   NULL,             MENU_MAIN },  // Go back to the Main menu
-};
-
-// Entries description for the Solo menu
-const MenuItem g_MenuSolo[] =
-{ //  Entry text    Type              Action            Value
-	{ "START>",     MENU_ITEM_ACTION, MenuAction_Start, 2 },          // Start a solor game
-	{ "CONTROL",    MENU_ITEM_ACTION, MenuAction_Input, 2 },          // Change player input set
-	{ "CPU",        MENU_ITEM_ACTION, MenuAction_AI,    0 },          // Change AI level
-	{ "RULES>",     MENU_ITEM_GOTO,   NULL,             MENU_RULES }, // Open Rules menu
-	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },          // Blank entry
-	{ "BACK",       MENU_ITEM_GOTO,   NULL,             MENU_MAIN },  // Go back to the Main menu
-};
-
-// Entries description for the Rules menu
-const MenuItem g_MenuRules[] =
-{ //  Entry text    Type              Action            Value
-	{ "POINTS",     MENU_ITEM_INT,    &g_Option.Rule.GamePoints, (i16)&g_MenuPointsMinMax },  // Change points to win a game. When type is MENU_ITEM_INT, 'Action' is a pointer to the variable and 'Value' is an option MenuItemMinMax structure to define values boundaries.
-	{ "BOUNCES",    MENU_ITEM_INT,    &g_Option.Rule.MaxBounce,  (i16)&g_MenuBouncesMinMax }, // Change max bounce on ground allowed
-	{ "DRIBBLES",   MENU_ITEM_INT,    &g_Option.Rule.MaxDribble, (i16)&g_MenuBouncesMinMax }, // Change max bounce on player allowed
-	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 }, // Blank entry
-	{ "BACK",       MENU_ITEM_BACK,   NULL,             0 }, // Go back to previous menu
-};
-
-// Entries description for the Option menu
-// Note: The 'const' is removed to be able to modify this array at runtime (to hide/show some entries)
-/*const*/ MenuItem g_MenuOptions[] =
-{ //  Entry text    Type              Action            Value
-	{ "AUDIO>",     MENU_ITEM_GOTO,   NULL,             MENU_AUDIO }, // Open Audio menu
-	{ "VIDEO>",     MENU_ITEM_GOTO,   NULL,             MENU_GRAPH }, // Open Graph menu
-	{ "SAVE",       MENU_ITEM_ACTION, MenuAction_Save,  0 },          // Save current options to Clock's SRAM (for MSX2 or above)
-	{ "RESET",      MENU_ITEM_ACTION, MenuAction_Reset, 0 },          // Reset options to default values
-	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },          // Blank entry
-	{ "BACK",       MENU_ITEM_GOTO,   NULL,             MENU_MAIN },  // Back to the Main menu
-};
-
-// Entries description for the Audio options menu
-const MenuItem g_MenuAudio[] =
-{ //  Entry text    Type              Action            Value
-	{ "MUSIC",      MENU_ITEM_ACTION, MenuAction_Music, 0 },           // Activate/deactivate music
-	{ "SFX",        MENU_ITEM_BOOL,   &g_Option.SFX,    NULL },        // Activate/deactivate SFX
-	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },           // Blank entry
-	{ "BACK",       MENU_ITEM_GOTO,   NULL,             MENU_OPTION }, // Back to the Option menu
-};
-
-// Entries description for the Graphical options menu
-// Note: The 'const' is removed to be able to modify this array at runtime (to hide/show some entries)
-/*const*/ MenuItem g_MenuGraph[] =
-{ //  Entry text    Type              Action            Value
-	{ "CLR MIX",    MENU_ITEM_BOOL,   &g_Option.Blend,  NULL },        // Activate/deactivate color blending (using sprite flickering)
-	{ "RULE CLR",   MENU_ITEM_BOOL,   &g_Option.Feedback, NULL },      // Activate/deactivate ball rule feedback (ball color change when a rule reach its limit)
-	{ "FREQ",       MENU_ITEM_ACTION, MenuAction_Freq,  0 },           // Change screen refresh rate (for MSX2 or above)
-	{ "PALETTE",    MENU_ITEM_ACTION, MenuAction_Palette, 0 },         // Change color palette (for MSX2 or above)
-	{ NULL,         MENU_ITEM_EMPTY,  NULL,             0 },           // Blank entry
-	{ "BACK",       MENU_ITEM_GOTO,   NULL,             MENU_OPTION }, // Back to the Option menu
-};
-
-// Entries description for the Credits menu
-const MenuItem g_MenuCredits1[] =
-{ //  Entry text                 Type             Action    Value
-	{ "CODE        AOINEKO",     MENU_ITEM_TEXT,  NULL,     -3 }, // Display text only. When type is MENU_ITEM_TEXT, 'Value' is horizontal display offset
-	{ "DESIGN      PIXEL PHENIX",MENU_ITEM_TEXT,  NULL,     -3 },
-	{ "SPRITES     GRAFXKID",    MENU_ITEM_TEXT,  NULL,     -3 },
-	{ "GRAPHICS    YAZ",         MENU_ITEM_TEXT,  NULL,     -3 },
-	{ "FONT        LUDO 'GFX'",  MENU_ITEM_TEXT,  NULL,     -3 },
-	{ "MUSIC       MAKOTO",      MENU_ITEM_TEXT,  NULL,     -3 },
-	{ NULL,                      MENU_ITEM_EMPTY, NULL,     0 },   // Blank entry
-	{ "NEXT>",                   MENU_ITEM_GOTO,  NULL,     MENU_CREDITS2 }, // Go to next credits page
-};
-
-// Entries description for the Credits menu
-const MenuItem g_MenuCredits2[] =
-{ //  Entry text                 Type             Action    Value
-	{ "VERSION " GAME_VERSION,   MENU_ITEM_TEXT,  NULL,     -2 }, // Display text only
-	{ "MADE WITH MSXGL",         MENU_ITEM_TEXT,  NULL,     -2 },
-	{ "PIXEL PHENIX & 2025",     MENU_ITEM_TEXT,  NULL,     -2 },
-	{ NULL,                      MENU_ITEM_EMPTY, NULL,     0 },  // Blank entry
-	{ "BACK",                    MENU_ITEM_GOTO,  NULL,     MENU_MAIN },   // Back to Main menu
-};
-
-// List of all menu pages
-const Menu g_Menus[MENU_MAX] =
-{
-//    Title (title of the page; NULL means no title)
-//    |     Items (ist of the page's menu entries)
-//    |     |               ItemNum (number of the page's menu entries)
-//    |     |               |                         Callback (function to be called when page is opened)
-	{ NULL,	g_MenuMain,     numberof(g_MenuMain),     NULL }, // MENU_MAIN
-	{ NULL,	g_MenuVersus,   numberof(g_MenuVersus),   NULL }, // MENU_VERSUS
-	{ NULL,	g_MenuSolo,     numberof(g_MenuSolo),     NULL }, // MENU_SOLO
-	{ NULL,	g_MenuRules,    numberof(g_MenuRules),    NULL }, // MENU_RULES
-	{ NULL,	g_MenuOptions,  numberof(g_MenuOptions),  NULL }, // MENU_OPTION
-	{ NULL,	g_MenuAudio,    numberof(g_MenuAudio),    NULL }, // MENU_AUDIO
-	{ NULL,	g_MenuGraph,    numberof(g_MenuGraph),    NULL }, // MENU_GRAPH
-	{ NULL,	g_MenuCredits1, numberof(g_MenuCredits1), NULL }, // MENU_CREDITS1
-	{ NULL,	g_MenuCredits2, numberof(g_MenuCredits2), NULL }, // MENU_CREDITS2
-};
-
-//=============================================================================
-// FUNCTIONS
-//=============================================================================
-
-//-----------------------------------------------------------------------------
-// AUDIO
-//-----------------------------------------------------------------------------
-
-// Set the new music to be player
-//
-// Parameters:
-//   id: Music ID (from MUSIC_xxx enum)
-inline void PlayMusic(u8 id) { if (g_Option.Music) g_NextMusic = id; }
-
-// Stop current music
-inline void StopMusic() { g_NextMusic = MUSIC_EMPTY; }
-
-// Set a new SFX to be player in a specific channel
-//
-// Parameters:
-//   id   - SFX ID (from SFX_xxx enum)
-//   chan - Channel to play the SFX (from ARKOS_CHANNEL_xxx enum)
-//   vol  - Volume (0-15)
-inline void PlaySFX(u8 id, u8 chan, u8 vol) { g_NextSFX[chan] = id; g_NextSFXVol[chan] = vol; }
-
-//-----------------------------------------------------------------------------
-// MENU
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-// Menu input handler (called by menu system)
-u8 MenuInputHandler()
-{
-	u8 in = CheckKB2() | CheckJoy1() | CheckJoy2(); // Get input from keyboard and joystick (the game use the same input value than menu)
-	u8 ret = in & ~g_PrevInput; // Only return new input
-	g_PrevInput = in;
-	return ret;
-}
-
-//-----------------------------------------------------------------------------
-// Menu event handler (called by menu system)
-//
-// Parameters:
-//   event - Triggered event (from MENU_EVENT_xxx enum)
-void MenuEventHandler(u8 event)
-{
-	switch (event)
-	{
-	case MENU_EVENT_UP: // User pressed UP
-		PlaySFX(SFX_TIC, ARKOS_CHANNEL_C, 0x0F);
-		break;
-
-	case MENU_EVENT_DOWN: // User pressed DOWN
-		PlaySFX(SFX_TAC, ARKOS_CHANNEL_C, 0x0F);
-		break;
-
-	case MENU_EVENT_SET: // User change a menu entry's value
-	case MENU_EVENT_INC:
-	case MENU_EVENT_DEC:
-		PlaySFX(SFX_CLICK, ARKOS_CHANNEL_C, 0x0F);
-		switch (Menu_GetCurrentItem()->Type)
-		{
-		case MENU_ITEM_INT:
-		case MENU_ITEM_BOOL:
-			g_Saved = FALSE; // Dirty flag
-			break;
-		}
-		break;
-
-	// case MENU_EVENT_DRAW_TITLE:
-	// 	break;
-
-	case MENU_EVENT_DRAW_ENTRY: // A menu entry is being drawn
-		Print_SetPatternOffset(128); // Change font offset
-		break;
-
-	case MENU_EVENT_DRAW_SELECTED:// The selected menu entry is being drawn
-		Print_SetPatternOffset(192);
-		break;
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Menu callback to handle game start
-//
-// Parameters:
-//   op    - Operation (from MENU_ACTION_xxx enum)
-//   value - Value associated to the operation (defined in the menu entry data)
-//           0: Exit game
-//           1: Start player vs player game
-//           2: Start player vs AI game
-//
-// Returns:
-//   String to display next to the menu entry (or NULL)
-const c8* MenuAction_Start(u8 op, i8 value)
-{
-	switch (op)
-	{
-	case MENU_ACTION_SET:
-	case MENU_ACTION_INC:
-	case MENU_ACTION_DEC:
-		if (value == 0) // Exit
-			Bios_Exit(0);
-		else if (value == 1) // Start versus mode
-		{
-			g_AIGame = FALSE;
-			g_InputCheck1 = g_InputCheck[g_Option.InputSet[0]]; // Select input check function for each player
-			g_InputCheck2 = g_InputCheck[g_Option.InputSet[1]];
-			Game_SetState(State_GameInit);
-		}
-		else if (value == 2) // Start solo modo
-		{
-			g_AIGame = TRUE;
-			g_InputCheck1 = CheckAI; // Special input check function for AI
-			g_InputCheck2 = g_InputCheck[g_Option.InputSet[2]];
-			switch (g_Option.AILevel) // Select AI prediction function according to AI level
-			{
-			case AI_EASY:
-				g_AIPredict = GetBallHitX_Easy;
-				break;
-			case AI_MEDIUM:
-				g_AIPredict = GetBallHitX_Medium;
-				break;
-			case AI_HARD:
-				g_AIPredict = GetBallHitX_Hard;
-				break;
-			}	
-			Game_SetState(State_GameInit);
-		}
-		break;
-	}
-
-	return NULL;
-}
-
-//-----------------------------------------------------------------------------
-// Menu callback to handle player input selection
-//
-// Parameters:
-//   op    - Operation (from MENU_ACTION_xxx enum)
-//   value - Value associated to the operation (defined in the menu entry data)
-//           0: Player 1 input set
-//           1: Player 2 input set
-//           2: Player input set (solo mode)
-//
-// Returns:
-//   String to display next to the menu entry (or NULL)
-const c8* MenuAction_Input(u8 op, i8 value)
-{
-	switch (op)
-	{
-	case MENU_ACTION_SET:
-	case MENU_ACTION_INC:
-	inc_input_set: // Search for next valid input set
-		g_Option.InputSet[value] = (g_Option.InputSet[value] + 1) % INPUT_SET_MAX;
-		if ((value < 2) && (g_Option.InputSet[value] == g_Option.InputSet[1 - value]))
-			goto inc_input_set;
-		g_Saved = FALSE;
-		break;
-	case MENU_ACTION_DEC:
-	dec_input_set: // Search for previous valid input set
-		g_Option.InputSet[value] = (g_Option.InputSet[value] + (INPUT_SET_MAX - 1)) % INPUT_SET_MAX;
-		if ((value < 2) && (g_Option.InputSet[value] == g_Option.InputSet[1 - value]))
-			goto dec_input_set;
-		g_Saved = FALSE;
-		break;
-	}
-
-	return g_InputSetName[g_Option.InputSet[value]]; // Return input set name
-}
-
-//-----------------------------------------------------------------------------
-// Menu callback to handle AI level selection
-//
-// Parameters:
-//   op    - Operation (from MENU_ACTION_xxx enum)
-//   value - Value associated to the operation (not used here)
-//
-// Returns:
-//   String to display next to the menu entry (or NULL)
-const c8* MenuAction_AI(u8 op, i8 value)
-{
-	value;
-	switch (op)
-	{
-	case MENU_ACTION_SET:
-	case MENU_ACTION_INC: // Select next AI level
-		if (g_Option.AILevel < AI_MAX - 1)
-			g_Option.AILevel++;
-		else
-			g_Option.AILevel = 0;
-		g_Saved = FALSE;
-		break;
-	case MENU_ACTION_DEC: // Select previous AI level
-		if (g_Option.AILevel > 0)
-			g_Option.AILevel--;
-		else
-			g_Option.AILevel = AI_MAX - 1;
-		g_Saved = FALSE;
-		break;
-	}
-
-	switch (g_Option.AILevel)
-	{
-	case AI_EASY:
-		return "EASY";
-	case AI_MEDIUM:
-		return "MEDIUM";
-	case AI_HARD:
-		return "HARD";
-	}
-	return NULL;
-}
-
-//-----------------------------------------------------------------------------
-// Menu callback to handle frequency change
-//
-// Parameters:
-//   op    - Operation (from MENU_ACTION_xxx enum)
-//   value - Value associated to the operation (not used here)
-//
-// Returns:
-//   String to display next to the menu entry (or NULL)
-const c8* MenuAction_Freq(u8 op, i8 value)
-{
-	value;
-	switch (op)
-	{
-	case MENU_ACTION_SET:
-	case MENU_ACTION_INC: // Select next frequency option
-		if (g_Option.Freq < FREQ_MAX - 1)
-			g_Option.Freq++;
-		else
-			g_Option.Freq = 0;
-		g_Saved = FALSE;
-		break;
-	case MENU_ACTION_DEC: // Select previous frequency option
-		if (g_Option.Freq > 0)
-			g_Option.Freq--;
-		else
-			g_Option.Freq = FREQ_MAX - 1;
-		g_Saved = FALSE;
-		break;
-	}
-
-	ApplyFreqOption(); // Set frequency according to new option or default detected value
-	if (g_Option.Freq == FREQ_60HZ) 
-		return "60HZ";
-	else if (g_Option.Freq == FREQ_50HZ)
-		return "50HZ";
-	else // if (g_Option.Freq == FREQ_AUTO) 
-	{
-		if (g_FreqCurrent == FREQ_50HZ)
-			return "AUTO:50HZ";
-		else
-			return "AUTO:60HZ";
-	}
-
-	return NULL;
-}
-
-//-----------------------------------------------------------------------------
-// Menu callback to handle palette change
-//
-// Parameters:
-//   op    - Operation (from MENU_ACTION_xxx enum)
-//   value - Value associated to the operation (not used here)
-//
-// Returns:
-//   String to display next to the menu entry (or NULL)
-const c8* MenuAction_Palette(u8 op, i8 value)
-{
-	value;
-	if (g_VersionVDP == VDP_VERSION_TMS9918A) // Option can't be changed on MSX1
-		return "(FOR MSX2)";
-
-	switch (op)
-	{
-	case MENU_ACTION_SET:
-	case MENU_ACTION_INC: // Select next palette
-		g_Option.Palette = (g_Option.Palette + 1) % PAL_MAX;
-		g_Saved = FALSE;
-		break;
-	case MENU_ACTION_DEC: // Select previous palette
-		g_Option.Palette = (g_Option.Palette + (PAL_MAX - 1)) % PAL_MAX;
-		g_Saved = FALSE;
-		break;
-	}
-
-	ApplyPaletteOption();
-	switch (g_Option.Palette)
-	{
-	case PAL_CUSTOM:
-		return "CUSTOM";
-	case PAL_MSX1: 
-		return "MSX1";
-	case PAL_MSX2: 
-		return "MSX2";
-	case PAL_GRAY:
-		return "GRAY";
-	}
-
-	return NULL;
-}
-
-//-----------------------------------------------------------------------------
-// Menu callback to handle music enabling/disabling
-//
-// Parameters:
-//   op    - Operation (from MENU_ACTION_xxx enum)
-//   value - Value associated to the operation (not used here)
-//
-// Returns:
-//   String to display next to the menu entry (or NULL)
-const c8* MenuAction_Music(u8 op, i8 value)
-{
-	value;
-	switch (op)
-	{
-	case MENU_ACTION_SET:
-	case MENU_ACTION_INC:
-	case MENU_ACTION_DEC:
-		TOGGLE(g_Option.Music);
-		g_Saved = FALSE;
-		ApplyMusicOption();
-		break;
-	}
-	return g_Option.Music ? "#" : "$";
-}
-
-//-----------------------------------------------------------------------------
-// Menu callback to handle otion save on RTC's SRAM
-//
-// Parameters:
-//   op    - Operation (from MENU_ACTION_xxx enum)
-//   value - Value associated to the operation (not used here)
-//
-// Returns:
-//   String to display next to the menu entry (or NULL)
-const c8* MenuAction_Save(u8 op, i8 value)
-{
-	value;
-	if (g_VersionVDP == VDP_VERSION_TMS9918A) // Option can't be used on MSX1
-		return "(FOR MSX2)";
-
-	switch (op)
-	{
-	case MENU_ACTION_SET:
-	case MENU_ACTION_INC:
-	case MENU_ACTION_DEC:
-		SaveOptions();
-		break;
-	}
-
-	RTC_SetMode(RTC_MODE_BLOCK_3);
-	bool bValid = ((RTC_Read(0) == RTC_DATA_SIGNSAVE) && (RTC_LoadDataSigned(g_SaveData)));
-	return g_Saved ? "SAVED" : (bValid) ? "MODIFIED" : "EMPTY";
-}
-
-//-----------------------------------------------------------------------------
-// Menu callallback to hadle options reset
-//
-// Parameters:
-//   op    - Operation (from MENU_ACTION_xxx enum)
-//   value - Value associated to the operation (not used here)
-//
-// Returns:
-//   String to display next to the menu entry (or NULL)
-const c8* MenuAction_Reset(u8 op, i8 value)
-{
-	value;
-	switch (op)
-	{
-	case MENU_ACTION_SET:
-	case MENU_ACTION_INC:
-	case MENU_ACTION_DEC:
-		ResetOptions();
-		Menu_SetDirty();
-		break;
-	}
-	return NULL;
-}
-
-//-----------------------------------------------------------------------------
-// RULES
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-// Handle change field rule
-//
-// Parameters:
-//   field - New field (0:left, 1:right)
-void Rules_ChangeField(u8 field)
-{
-	g_Field = field;
-	g_BounceNum = 0;
-	g_DribbleNum = 0;
-	UpdateBallColor();
-}
-
-//-----------------------------------------------------------------------------
-// Handle match starting rule
-void Rules_Init()
-{
-	g_Player[0].Score = 0;
-	g_Player[1].Score = 0;
-	DrawScore();
-	Rules_ChangeField(g_AIGame ? 1 : 0);
-}	
-
-//-----------------------------------------------------------------------------
-// Handle score point rule
-//
-// Parameters:
-//   ply   - Player that score the point (0:left, 1:right)
-//   event - Event that cause the point (from SCORE_xxx enum)
-void Rules_Score(u8 ply, u8 event)
-{
-	g_Victorious = ply;
-	g_Player[ply].Score++;
-	if ((g_Player[ply].Score >= g_Option.Rule.GamePoints) && (g_Player[ply].Score > g_Player[1 - ply].Score + 1))
-	{
-		Game_SetState(State_VictoryInit);
-	}
-	else
-	{
-		g_StateTimer = 20;
-		VDP_SetColor(COLOR_WHITE);
-		Game_SetState(State_Point);
-	}
-	PlaySFX(SFX_CUICUI, ARKOS_CHANNEL_C, 0x0F);
-	DrawScore();
-	DrawInfo(event);
-}	
-
-//-----------------------------------------------------------------------------
-// Handle ground bounces rule
-void Rules_Bounce()
-{
-	g_BounceNum++;
-	if ((g_Option.Rule.MaxBounce != 0xFF) && (g_BounceNum > g_Option.Rule.MaxBounce))
-		Rules_Score(1 - g_Field, SCORE_BOUNCE);
-	g_LastTouch = g_Field;
-	UpdateBallColor();
-}
-
-//-----------------------------------------------------------------------------
-// Handle player bounces (dribble) rule
-void Rules_Dribble()
-{
-	g_DribbleNum++;
-	if ((g_Option.Rule.MaxDribble != 0) && (g_DribbleNum > g_Option.Rule.MaxDribble))
-		Rules_Score(1 - g_Field, SCORE_DRIBBLE);
-	g_LastTouch = g_Field;
-	UpdateBallColor();
-}
-
-//-----------------------------------------------------------------------------
-// Handle out-of-field rule
-void Rules_Out()
-{
-	Rules_Score(1 - g_LastTouch, SCORE_OUT);
-}
-
-//-----------------------------------------------------------------------------
-// PHYSICS
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-// Physics handler callback for player
-//
-// Parameters:
-//   event - Triggered event (from PAWN_PHYSICS_xxx enum)
-//   ply   - Pointer to the player structure
-void PlayerPhysics(u8 event, Character* ply)
-{
-	switch (event)
-	{
-	case PAWN_PHYSICS_BORDER_DOWN: // Handle downward collisions 
-	case PAWN_PHYSICS_COL_DOWN:
-		if (ply->bInAir) // Just landed
-		{
-			ply->bInAir = FALSE;
-			PlaySFX(SFX_LAND, ply->ID, 0x0C);
-		}
-		break;
-
-	case PAWN_PHYSICS_FALL: // Handle falling
-		if (!ply->bInAir) // Just falling
-		{
-			ply->bInAir = TRUE;
-			ply->VelocityY = 0;
-		}
-		break;
-	};
-}
-
-//-----------------------------------------------------------------------------
-// Physics callback registred for player 1's pawn
-//
-// Parameters:
-//   event - Triggered event (from PAWN_PHYSICS_xxx enum)
-//   tile  - Pattern index of the collided tile
-void PhysicsEventPlayer1(u8 event, u8 tile)
-{
-	tile;
-	PlayerPhysics(event, &g_Player[0]);
-}
-
-//-----------------------------------------------------------------------------
-// Physics callback registred for player 2's pawn
-//
-// Parameters:
-//   event - Triggered event (from PAWN_PHYSICS_xxx enum)
-//   tile  - Pattern index of the collided tile
-void PhysicsEventPlayer2(u8 event, u8 tile)
-{
-	tile;
-	PlayerPhysics(event, &g_Player[1]);
-}
-
-//-----------------------------------------------------------------------------
-// Physics callback registred for ball's pawn
-//
-// Parameters:
-//   event - Triggered event (from PAWN_PHYSICS_xxx enum)
-//   tile  - Pattern index of the collided tile
-void PhysicsEventBall(u8 event, u8 tile)
-{
-	tile;
-	switch (event)
-	{
-	case PAWN_PHYSICS_BORDER_DOWN: // Handle downward collisions 
-	case PAWN_PHYSICS_COL_DOWN:
-		PlaySFX(SFX_BUMP2, ARKOS_CHANNEL_C, ((g_Ball.VelocityY >> 3) & 0x03) + 11); // Make bounce volume depend on vertical velocity
-		g_Ball.VelocityY *= -1; // Reverse vertical velocity (for a bouncy effect)
-		Pawn_SetAction(&g_Ball.Pawn, ACTION_BALL_BUMP);
-		if (g_Ball.Pawn.PositionY > 140) // Only count bounce if ball hit the ground
-			Rules_Bounce();
-		break;
-
-	case PAWN_PHYSICS_COL_RIGHT: // Handle net
-	case PAWN_PHYSICS_COL_LEFT:
-		g_Ball.VelocityX *= -1; // Horizontal bounce
-		break;
-	
-	case PAWN_PHYSICS_BORDER_RIGHT: // Handle border
-	case PAWN_PHYSICS_BORDER_LEFT:
-		Rules_Out(); // Check point scoring
-		break;
-
-	case PAWN_PHYSICS_FALL: // Handle falling
-		break;
-	};
-}
-
-//-----------------------------------------------------------------------------
-// Collision callback registred for all pawns
-//
-// Parameters:
-//   tile - Index of the tile to check
-//
-// Return:
-//   TRUE if the tile is a blocker, FALSE otherwise
-bool PhysicsCollision(u8 tile)
-{
-	return tile; // Any non-zero tile index is a blocker
-}
-
-//-----------------------------------------------------------------------------
-// INPUT
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-// Check if any trigger key is pressed (keyboard space bar or joysticks button A)
-//
-// Return:
-//   TRUE if the trigger is pressed, FALSE otherwise
-bool TriggerPressed()
-{
-	if (Keyboard_IsKeyPressed(KEY_SPACE))
-		return TRUE;
-
-	if ((Joystick_Read(JOY_PORT_1) & JOY_INPUT_TRIGGER_A) == 0)
-		return TRUE;
-	
-	if ((Joystick_Read(JOY_PORT_2) & JOY_INPUT_TRIGGER_A) == 0)
-		return TRUE;
-		
-	return FALSE;
-}
-
-//-----------------------------------------------------------------------------
-// Check keyboard configuration 1
-//
-// Return:
-//   Input state (bitfield of INPUT_xxx flags)
-u8 CheckKB1()
-{
-	u8 row3 = Keyboard_Read(3);
-	u8 ret = INPUT_NONE;
-	if (IS_KEY_PRESSED(row3, KEY_D))
-		ret |= INPUT_LEFT;
-	else if (IS_KEY_PRESSED(row3, KEY_G))
-		ret |= INPUT_RIGHT;
-	if (IS_KEY_PRESSED(row3, KEY_F))
-		ret |= INPUT_ACTION;
-	return ret;
-}
-
-//-----------------------------------------------------------------------------
-// Check keyboard configuration 2
-//
-// Return:
-//   Input state (bitfield of INPUT_xxx flags)
-u8 CheckKB2()
-{
-	u8 row8 = Keyboard_Read(8);
-	u8 ret = INPUT_NONE;
-	if (IS_KEY_PRESSED(row8, KEY_RIGHT))
-		ret |= INPUT_RIGHT;
-	else if (IS_KEY_PRESSED(row8, KEY_LEFT))
-		ret |= INPUT_LEFT;
-	if (IS_KEY_PRESSED(row8, KEY_UP))
-		ret |= INPUT_UP | INPUT_ACTION;
-	else if (IS_KEY_PRESSED(row8, KEY_DOWN))
-		ret |= INPUT_DOWN;
-	if (IS_KEY_PRESSED(row8, KEY_SPACE))
-		ret |= INPUT_BUTTON1 | INPUT_ACTION;
-	if (IS_KEY_PRESSED(row8, KEY_ESC))
-		ret |= INPUT_BUTTON2;
-	return ret;
-}
-
-//-----------------------------------------------------------------------------
-// Check joystick port
-//
-// Parameters:
-//   port - Joystick port to read (JOY_PORT_1 or JOY_PORT_2)
-//
-// Return:
-//   Input state (bitfield of INPUT_xxx flags)
-u8 CheckJoystick(u8 port)
-{
-	u8 joy = Joystick_Read(port);
-	u8 ret = INPUT_NONE;
-	if ((joy & JOY_INPUT_DIR_LEFT) == 0)
-		ret |= INPUT_LEFT;
-	else if ((joy & JOY_INPUT_DIR_RIGHT) == 0)
-		ret |= INPUT_RIGHT;
-	if ((joy & JOY_INPUT_DIR_UP) == 0)
-		ret |= INPUT_UP;
-	else if ((joy & JOY_INPUT_DIR_DOWN) == 0)
-		ret |= INPUT_DOWN;
-	if ((joy & JOY_INPUT_TRIGGER_A) == 0)
-		ret |= INPUT_BUTTON1 | INPUT_ACTION;
-	if ((joy & JOY_INPUT_TRIGGER_B) == 0)
-		ret |= INPUT_BUTTON2;
-	return ret;
-}
-
-//-----------------------------------------------------------------------------
-// Check joystick port 1
-//
-// Return:
-//   Input state (bitfield of INPUT_xxx flags)
-u8 CheckJoy1()
-{
-	return CheckJoystick(JOY_PORT_1);
-}
-
-//-----------------------------------------------------------------------------
-// Check joystick port 2
-//
-// Return:
-//   Input state (bitfield of INPUT_xxx flags)
-u8 CheckJoy2()
-{
-	return CheckJoystick(JOY_PORT_2);
-}
-
-//-----------------------------------------------------------------------------
-// Ball hit ground X prediction for easy AI level
-u8 GetBallHitX_Easy()
-{
-	const Pawn* ballPawn = &g_Ball.Pawn;
-
-	i16 hitX = ballPawn->PositionX + Q4_4_GET(g_Ball.VelocityX * ((168 - ballPawn->PositionY) / 4));
-	if (hitX < 0)
-		hitX = 0;
-	else if (hitX > 255)
-		hitX = 255;
-	return (u8)hitX;
-}
-
-//-----------------------------------------------------------------------------
-// Ball hit ground X prediction for medium AI level
-u8 GetBallHitX_Medium()
-{
-	const Pawn* ballPawn = &g_Ball.Pawn;
-
-	i16 hitX = ballPawn->PositionX + Q4_4_GET(g_Ball.VelocityX * ((168 - ballPawn->PositionY) / 3));
-	if (hitX < 0)
-		hitX = 0;
-	else if (hitX > 255)
-		hitX = 255;
-	return (u8)hitX;
-}
-
-//-----------------------------------------------------------------------------
-// Ball hit ground X prediction for hard AI level
-u8 GetBallHitX_Hard()
-{
-	const Pawn* ballPawn = &g_Ball.Pawn;
-
-	u8 hitT = 0;
-	i8 hitV = g_Ball.VelocityY;
-	i16 hitH = Q12_4_SET(ballPawn->PositionY);
-	while (hitH < Q12_4_SET(168))
-	{
-		hitV += BALL_GRAVITY; // Apply gravity
-		if (hitV > FALL_MAX_SPEED) // Clamp fall speed
-			hitV = FALL_MAX_SPEED;
-		hitH += hitV;
-		hitT++;
-	}
-	i16 hitX = ballPawn->PositionX + Q4_4_GET(g_Ball.VelocityX * hitT);
-	if (hitX < 0)
-		hitX = 0;
-	else if (hitX > 255)
-		hitX = 255;
-	return (u8)hitX;
-}
-
-//-----------------------------------------------------------------------------
-// Check for AI input (special input check function for AI player)
-//
-// Return:
-//   Input state (bitfield of INPUT_xxx flags)
-u8 CheckAI()
-{
-	const Pawn* ballPawn = &g_Ball.Pawn;
-	const Pawn* plyPawn = &g_Player[0].Pawn;
-
-// VDP_SetColor(COLOR_BLACK);
-
-	// Serve
-	if ((ballPawn->PositionX < 128) && (g_Ball.bFreeze == TRUE))
-	{
-		if (g_AIWait > 0) // Wait a bit before serving
-		{
-			g_AIWait--;
-			return INPUT_NONE;
-		}
-
-		if (plyPawn->PositionX < 40)
-			return INPUT_ACTION | INPUT_RIGHT;
-		else
-			return INPUT_LEFT;
-	}
-
-// VDP_SetColor(COLOR_DARK_GREEN);
-
-	g_BallGroundX = g_AIPredict();
-	// SetSprite(SPRITE_HIT_MARKER, g_BallGroundX, 176, 124, COLOR_MEDIUM_RED);
-
-	// Repositionning
-	if ((ballPawn->PositionX > 128) && (g_BallGroundX > 128))
-	{
-		if (plyPawn->PositionX < 32)
-				return INPUT_RIGHT;
-		else if (plyPawn->PositionX > 64)
-			return INPUT_LEFT;
-		else
-			return INPUT_NONE;
-	}	
-
-// VDP_SetColor(COLOR_DARK_RED);
-
-	// Shoot
-#if (1)
-	i8 dx = (g_BallGroundX - plyPawn->PositionX);
-	i8 sx = (ballPawn->PositionX - plyPawn->PositionX);
-	if ((dx > 0) && (sx < 24) && (ballPawn->PositionX < 128) && (ballPawn->PositionY > 128))
-	{
-		if (sx > g_AIReceptOffset[plyPawn->PositionX / 16])
-			return INPUT_ACTION | INPUT_RIGHT;
-		else
-			return INPUT_ACTION;
-	}
-#else
-	i8 dx = ballPawn->PositionX - plyPawn->PositionX;
-	i8 dy = plyPawn->PositionY - ballPawn->PositionY;
-	if ((dx + dy < 40) && (ballPawn->PositionX < 128))
-	{
-		if (dx > g_AIReceptOffset[plyPawn->PositionX / 16])
-			return INPUT_ACTION | INPUT_RIGHT;
-		else
-			return INPUT_ACTION;
-	}
-#endif
-
-// VDP_SetColor(COLOR_DARK_BLUE);
-
-	// Reception
-	if (plyPawn->PositionX < g_BallGroundX)
-		return INPUT_RIGHT;
-	else
-		return INPUT_LEFT;
-}
-
-//-----------------------------------------------------------------------------
-// MISC
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-// Apply palette option (for MSX2)
-void ApplyPaletteOption()
-{
-	if (g_VersionVDP == VDP_VERSION_TMS9918A) // Only for MSX2 or above
-		return;
-
-	switch (g_Option.Palette)
-	{
-	case PAL_CUSTOM:
-		VDP_SetPalette((u8*)g_CustomPalette); // Alternative MSX palette tweaked for the game
-		return;
-	case PAL_MSX1: 
-		VDP_SetMSX1Palette();
-		return;
-	case PAL_MSX2: 
-		VDP_SetDefaultPalette();
-		return;
-	case PAL_GRAY:
-		VDP_SetPalette((u8*)g_GrayPalette);
-		return;
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Apply frequency option
-void ApplyFreqOption()
-{
-	// Set gameplay frequency according to option
-	if (g_Option.Freq == FREQ_60HZ) 
-		g_FreqCurrent = FREQ_60HZ;
-	else if (g_Option.Freq == FREQ_50HZ)
-		g_FreqCurrent = FREQ_50HZ;
-	else // if (g_Option.Freq == FREQ_AUTO)
-		g_FreqCurrent = g_FreqDetected;
-
-	// Change VDP frequency
-	if (g_VersionVDP > VDP_VERSION_TMS9918A)
-	{
-		VDP_SetFrequency((g_FreqCurrent == FREQ_50HZ) ? VDP_FREQ_50HZ : VDP_FREQ_60HZ);
-	}
-	Game_SetIs60Hz(g_FreqCurrent == FREQ_60HZ);
-}
-
-//-----------------------------------------------------------------------------
-// Apply music option
-void ApplyMusicOption()
-{
-	if (g_Option.Music)
-		PlayMusic(MUSIC_MAIN);
-	else
-		StopMusic();
-}	
-
-//-----------------------------------------------------------------------------
-// Initialize sprite according to sprite model (SM1 or SM2)
-//
-// Parameters:
-//   idx   - Sprite index (0-31)
-//   x     - Sprite X coordinate
-//   y     - Sprite Y coordinate
-//   shape - Sprite shape (pattern index)
-//   color - Sprite color
-void SetSprite(u8 idx, u8 x, u8 y, u8 shape, u8 color)
-{
-	if (g_VersionVDP == VDP_VERSION_TMS9918A) // Sprite Mode 1
-		VDP_SetSpriteSM1(idx, x, y, shape, color);
-	else // Sprite Mode 2
-		VDP_SetSpriteExUniColor(idx, x, y, shape, color);
-}
-
-//-----------------------------------------------------------------------------
-// Set sprite color
-//
-// Parameters:
-//   idx   - Sprite index (0-31)
-//   color - Sprite color
-void SetSpriteColor(u8 idx, u8 color)
-{
-	if (g_VersionVDP == VDP_VERSION_TMS9918A) // Sprite Mode 1
-		VDP_SetSpriteColorSM1(idx, color);
-	else // Sprite Mode 2
-		VDP_SetSpriteUniColor(idx, color);
-}
-
-//-----------------------------------------------------------------------------
-// Draw the updated score
-void DrawScore()
-{
-	Print_SetPatternOffset(192);
-	Print_SetPosition(13, 0);
-	if (g_Player[0].Score < 10)
-		Print_DrawChar('0');
-	Print_DrawInt(g_Player[0].Score);
-
-	Print_SetPosition(17, 0);
-	if (g_Player[1].Score < 10)
-		Print_DrawChar('0');
-	Print_DrawInt(g_Player[1].Score);
-}
-
-//-----------------------------------------------------------------------------
-// Draw point info
-//
-// Parameters:
-//   event - Event that cause the point (from SCORE_xxx enum)
-void DrawInfo(u8 event)
-{
-	Print_SetPatternOffset(128);
-	switch (event)
-	{
-	case SCORE_OUT:
-		if (g_DribbleNum == 0)
-		{
-			if (g_BounceNum == 0)
-				Print_DrawTextAt(14, 15, "OUT!");
-			else if (g_ChangeNum == 1)
-				Print_DrawTextAt(14, 15, "ACE!");
-			else
-				Print_DrawTextAt(12, 15, "PASSING!");
-		}
-		return;
-	case SCORE_BOUNCE:
-	case SCORE_DRIBBLE:
-		Print_DrawTextAt(13, 15, "FAULT!");
-		return;
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Clear point info
-void ClearInfo()
-{
-	Print_SetPatternOffset(128);
-	Print_SetPosition(8, 15);
-	Print_DrawCharX(' ', 16); // Clear line
-}
-
-//-----------------------------------------------------------------------------
-// Load in all 3 screen sections
-//
-// Parameters:
-//   src - Pointer to the source GM2 data
-//   dst - Destination VRAM address
-void Pletter_LoadGM2(const u8* src, u16 dst)
-{
-	Pletter_UnpackToVRAM(src, dst); // Upper part of the screen
-	dst += 0x800;
-	Pletter_UnpackToVRAM(src, dst); // Middle part of the screen
-	dst += 0x800;
-	Pletter_UnpackToVRAM(src, dst); // Lower part of the screen
-}
-
-//-----------------------------------------------------------------------------
-// Initialize collision map
-void CollisionInit()
-{
-	Mem_Set(0, g_CollisionMap, sizeof(g_CollisionMap));
-	
-	// Ground
-	// Mem_Set(0xFF, g_CollisionMap + 23 * 32, 32);
-
-	// "Net"
-	loop(i, NET_H)
-	{
-		u8* ptr = g_CollisionMap + 15 + (i + (23 - NET_H)) * 32;
-		*ptr++ = 0xFF;
-		*ptr   = 0xFF;
-	}
-
-	Pawn_SetTileMap(g_CollisionMap);
-}
-
-//-----------------------------------------------------------------------------
-// Draw level background
-//
-// Parameters:
-//   bTitle - TRUE to draw title screen, FALSE to draw game level
-void DrawLevel(bool bTitle)
-{
-	// Background
-	Pletter_LoadGM2(g_DataBackground_Patterns, VDP_GetPatternTable());
-	Pletter_LoadGM2(g_DataBackground_Colors, VDP_GetColorTable());
-	Pletter_UnpackToVRAM(bTitle ? g_DataBackgroundL1_Names : g_DataBackgroundL0_Names, VDP_GetLayoutTable());
-	// VDP_FillVRAM_16K(0x01, VDP_GetLayoutTable(), 32);
-}
-
-//-----------------------------------------------------------------------------
-// Save options to RTC (pack option structure into a byte array)
-void SaveOptions()
-{
-	// Byte #0
-	g_SaveData[0] = g_Option.Palette & 0x07; // 0b00000111
-	if (g_Option.Music)    g_SaveData[0] |= 0b00010000;
-	if (g_Option.SFX)      g_SaveData[0] |= 0b00100000;
-	if (g_Option.Blend)    g_SaveData[0] |= 0b01000000;
-	if (g_Option.Feedback) g_SaveData[0] |= 0b10000000;
-
-	// Byte #1
-	g_SaveData[1]  = (g_Option.InputSet[0] & 0x03) << 0; // 0b00000011
-	g_SaveData[1] |= (g_Option.InputSet[1] & 0x03) << 2; // 0b00001100
-	g_SaveData[1] |= (g_Option.InputSet[2] & 0x03) << 4; // 0b00110000
-	g_SaveData[1] |= (g_Option.AILevel     & 0x03) << 6; // 0b11000000
-
-	// Byte #2
-	g_SaveData[2] = g_Option.Freq & 0x03;       // 0b00000011
-
-	// Bytes #3-5
-	g_SaveData[3] = g_Option.Rule.GamePoints;   // 0b00111111
-	g_SaveData[4] = g_Option.Rule.MaxBounce;    // 0b00001111
-	g_SaveData[5] = g_Option.Rule.MaxDribble;   // 0b00001111
-
-	RTC_SaveDataSigned(g_SaveData);
-	g_Saved = TRUE;
-}
-
-//-----------------------------------------------------------------------------
-// Load options from RTC (unpack options)
-void LoadOptions()
-{
-	RTC_SetMode(RTC_MODE_BLOCK_3);
-	if (RTC_Read(0) != RTC_DATA_SIGNSAVE)
-		return;
-
-	if (!RTC_LoadDataSigned(g_SaveData))
-		return;
-
-	// Byte #0
-	g_Option.Palette  = (g_SaveData[0] & 0b00000111);
-	g_Option.Music    = (g_SaveData[0] & 0b00010000);
-	g_Option.SFX      = (g_SaveData[0] & 0b00100000);
-	g_Option.Blend    = (g_SaveData[0] & 0b01000000);
-	g_Option.Feedback = (g_SaveData[0] & 0b10000000);
-
-	// Byte #1
-	g_Option.InputSet[0] = (g_SaveData[1] & 0b00000011) >> 0;
-	g_Option.InputSet[1] = (g_SaveData[1] & 0b00001100) >> 2;
-	g_Option.InputSet[2] = (g_SaveData[1] & 0b00110000) >> 4;
-	g_Option.AILevel     = (g_SaveData[1] & 0b11000000) >> 6;
-
-	// Byte #2
-	g_Option.Freq        = g_SaveData[2] & 0x03;
-
-	// Bytes #3-5
-	g_Option.Rule.GamePoints = g_SaveData[3];
-	g_Option.Rule.MaxBounce  = g_SaveData[4];
-	g_Option.Rule.MaxDribble = g_SaveData[5];
-
-	g_Saved = TRUE;
-}
-
-//-----------------------------------------------------------------------------
-// Reset options
-void ResetOptions()
-{
-	Mem_Copy((u8*)&g_OptionDefault, (u8*)&g_Option, sizeof(Option));
-	ApplyFreqOption();
-	ApplyPaletteOption();
-	ApplyMusicOption();
-	g_Saved = FALSE;
-}
-
-//-----------------------------------------------------------------------------
-// PLAYER
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-// Initialize player position
-//
-// Parameters:
-//   id - Player ID (0:left, 1:right)
-void InitPlayerPosition(u8 id)
-{
-	Character* ply = &g_Player[id];
-	Pawn* pawn = &ply->Pawn;
-	#if (1)
-	if (id == 0)
-		Pawn_SetPosition(pawn, 32, 168);
-	else
-		Pawn_SetPosition(pawn, (u8)(255 - 32 - 16), 168);
-	#else
-	if (id == 0)
-		Pawn_SetPosition(pawn, Q4_4_SET(32), Q4_4_SET(168));
-	else
-		Pawn_SetPosition(pawn, Q4_4_SET(255 - 32 - 16), Q4_4_SET(168));
-	#endif
-}
-
-//-----------------------------------------------------------------------------
-// Initialize player
-//
-// Parameters:
-//   id - Player ID (0:left, 1:right)
-void InitPlayer(u8 id)
-{
-	Character* ply = &g_Player[id];
-	Mem_Set(0, ply, sizeof(Character)); // Set all paramters to 0
-
-	ply->ID = id;
-	Pawn* pawn = &ply->Pawn;
-	if (id == 0)
-	{
-		Pawn_Initialize(pawn, g_SpriteLayers, numberof(g_SpriteLayers), 0, g_AnimActions);
-		Pawn_InitializePhysics(pawn, PhysicsEventPlayer1, PhysicsCollision, 16, 16);
-	}
-	else
-	{
-		Pawn_Initialize(pawn, g_SpriteLayers2, numberof(g_SpriteLayers2), 0, g_AnimActions);
-		Pawn_InitializePhysics(pawn, PhysicsEventPlayer2, PhysicsCollision, 16, 16);
-		Pawn_SetSpriteFX(pawn, PAWN_SPRITE_FX_FLIP_X);
-	}
-	Pawn_SetPatternAddress(pawn, g_DataSprtPlayer);
-	Pawn_SetColorBlend(pawn, g_Option.Blend);
-
-	InitPlayerPosition(id);
-
-	Pawn_Update(pawn);
-	
-	// Shadow
-	ply->Shadow = (id == 0) ? SPRITE_PLY1_SHADOW : SPRITE_PLY2_SHADOW; 
-	SetSprite(ply->Shadow, ply->Pawn.PositionX, 183, 24, SHADOW_COLOR);
-}
-
-//-----------------------------------------------------------------------------
-// Update character gameplay and display
-//
-// Parameters:
-//   ply - Pointer to the character structure
-void UpdateCharacter(Character* ply)
-{
-	Pawn* pawn = &ply->Pawn;
-
-	if (!ply->bFreeze)
-	{
-#if (1)
-		// Compute delta movement and store conversion rest
-		i8 dx = Q4_4_GET(ply->VelocityX);
-		ply->RestX += ply->VelocityX - dx;
-		dx += Q4_4_GET(ply->RestX);
-		ply->RestX = Q4_4_FRAC(ply->RestX);
-
-		// Compute delta movement and store conversion rest
-		i8 dy = Q4_4_GET(ply->VelocityY);
-		ply->RestY += ply->VelocityY - dy;
-		dy += Q4_4_GET(ply->RestY);
-		ply->RestY = Q4_4_FRAC(ply->RestY);
-		
-		Pawn_SetMovement(pawn, dx, dy);
-#else
-		Pawn_SetMovement(pawn, ply->VelocityX, ply->VelocityY);
-#endif
-	}
-	Pawn_Update(pawn);
-}
-
-//-----------------------------------------------------------------------------
-// Update player gameplay and display
-//
-// Parameters:
-//   ply - Pointer to the player structure
-void UpdatePlayer(Character* ply)
-{
-	// HORIZONTAL MOVEMENT
-
-	// Check movement input
-	if (ply->Input & INPUT_RIGHT)
-	{
-		ply->VelocityX += MOVE_ACCEL;
-		ply->bMoving = TRUE;
-	}
-	else if (ply->Input & INPUT_LEFT)
-	{
-		ply->VelocityX -= MOVE_ACCEL;
-		ply->bMoving = TRUE;
-	}
-	else // Apply friction
-	{
-		ply->bMoving = FALSE;
-		// if (ply->VelocityX > MOVE_FRICTION)
-		// 	ply->VelocityX -= MOVE_FRICTION;
-		// else if (ply->VelocityX < -MOVE_FRICTION)
-		// 	ply->VelocityX += MOVE_FRICTION;
-		// else
-			ply->VelocityX = 0;
-	}
-	// Clamp speed
-	ply->VelocityX = CLAMP8(ply->VelocityX, -MOVE_MAX_SPEED, MOVE_MAX_SPEED);
-
-	// VERTICAL MOVEMENT
-	
-	if (ply->bInAir) // Handle in air state (jump or fall)
-	{
-		ply->VelocityY += GRAVITY; // Apply gravity
-		if (ply->VelocityY > FALL_MAX_SPEED) // Clamp fall speed
-			ply->VelocityY = FALL_MAX_SPEED;
-	}
-	else if (ply->Input & INPUT_ACTION) // Initialize jump force
-	{
-		PlaySFX(SFX_JUMP, ply->ID, 0x0E);
-		ply->bInAir = TRUE;
-		ply->VelocityY = JUMP_FORCE;
-	}
-	else
-		ply->VelocityY = 0;
-
-	// UPDATE
-
-	// Update player animation & physics
-	u8 act = ACTION_PLAYER_IDLE;
-	if (ply->bInAir && (ply->VelocityY < 0)) // Up
-		act = ACTION_PLAYER_JUMP;
-	else if (ply->bInAir) // Down
-		act = ACTION_PLAYER_FALL;
-	else if (ply->bMoving)
-		act = ACTION_PLAYER_MOVE;
-
-	Pawn* pawn = &ply->Pawn;
-	Pawn_SetAction(pawn, act);
-	UpdateCharacter(ply);
-
-	// Player shadow
-	VDP_SetSpritePositionX(ply->Shadow, pawn->PositionX);
-	VDP_SetSpritePattern(ply->Shadow, g_ShadowPatternId[pawn->PositionY >> 3]);
-}
-
-//-----------------------------------------------------------------------------
-// BALL
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-// Initialize ball position
-void InitBallPosition()
-{
-	Pawn* pawn = &g_Ball.Pawn;
-	#if (1)
-	Pawn_SetPosition(pawn, (g_Field == 0) ? 56 : 184, 128);
-	#else
-	Pawn_SetPosition(pawn, (g_Field == 0) ? Q4_4_SET(56) : Q4_4_SET(184), Q4_4_SET(128));
-	#endif
-	g_Ball.bFreeze = TRUE;
-}
-
-//-----------------------------------------------------------------------------
-// Initialize ball structure
-void InitBall()
-{
-	Mem_Set(0, &g_Ball, sizeof(Character));
-	
-	Pawn* pawn = &g_Ball.Pawn;
-	Pawn_Initialize(pawn, g_BallLayers, numberof(g_BallLayers), 6, g_BallActions);
-	Pawn_InitializePhysics(pawn, PhysicsEventBall, PhysicsCollision, 16, 16);
-	Pawn_SetAction(pawn, ACTION_BALL_IDLE);
-	Pawn_SetPatternAddress(pawn, g_DataSprtBall);
-	
-	InitBallPosition();
-	SetSprite(SPRITE_BALL_SHADOW, pawn->PositionX, 183, 24, SHADOW_COLOR);
-	g_BallHit = FALSE;
-}
-
-//-----------------------------------------------------------------------------
-// Change ball color according to game rules
-void UpdateBallColor()
-{
-	if (!g_Option.Feedback)
-		return;
-
-	bool bWarning = (g_BounceNum >= g_Option.Rule.MaxBounce);
-	if (g_Option.Rule.MaxDribble != 0)
-		bWarning |= (g_DribbleNum >= g_Option.Rule.MaxDribble - 1);
-
-	if (bWarning)
-	{
-		SetSpriteColor(SPRITE_BALL_DARK, COLOR_DARK_RED);
-		SetSpriteColor(SPRITE_BALL_LIGHT, COLOR_MEDIUM_RED);
-	}
-	else
-	{
-		SetSpriteColor(SPRITE_BALL_DARK, COLOR_MEDIUM_RED);
-		SetSpriteColor(SPRITE_BALL_LIGHT, COLOR_LIGHT_RED);
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Update ball gameplay and display
-void UpdateBall()
-{
-	// Apply gravity
-	g_Ball.VelocityY += BALL_GRAVITY; // Apply gravity
-	if (g_Ball.VelocityY > FALL_MAX_SPEED) // Clamp fall speed
-		g_Ball.VelocityY = FALL_MAX_SPEED;
-
-	// Select the player to tests
-	Pawn* ballPawn = &g_Ball.Pawn;
-	Character* ply = (ballPawn->PositionX < 128 - 8) ? &g_Player[0] : &g_Player[1];
-
-	// Compute distance
-	Pawn* plyPawn = &ply->Pawn;
-	i8 dx = ballPawn->PositionX - plyPawn->PositionX;
-	i8 dy = ballPawn->PositionY - plyPawn->PositionY;
-
-	u16 sqrtDist = (dx * dx) + (dy * dy);
-	if (sqrtDist < COL_DIST * COL_DIST)
-	{
-		if (!g_BallHit)
-		{
-			g_BallHit = TRUE;
-			PlaySFX(SFX_BUMP2, ARKOS_CHANNEL_C, 0x0E);
-			Rules_Dribble();
-		}
-
-		g_Ball.VelocityX = dx * 2;
-		g_Ball.VelocityX += ply->VelocityX / 2;
-
-		g_Ball.VelocityY = Q4_4_SET(-1.5f);
-		if (ply->VelocityY < 0)
-			g_Ball.VelocityY += ply->VelocityY / 2;
-
-		g_Ball.bFreeze = FALSE;
-		Pawn_SetAction(ballPawn, ACTION_BALL_BUMP);
-		Pawn_SetAction(plyPawn, ACTION_PLAYER_HIT);
-	}
-	else
-		g_BallHit = FALSE;
-
-	// Update ball animation & physics
-	u8 x = ballPawn->PositionX;
-	UpdateCharacter(&g_Ball);
-
-	// Ball shadow
-	VDP_SetSpritePositionX(SPRITE_BALL_SHADOW, ballPawn->PositionX);
-	VDP_SetSpritePattern(SPRITE_BALL_SHADOW, g_ShadowPatternId[ballPawn->PositionY >> 3]);
-
-	if ((x <= 120) && (ballPawn->PositionX > 120))
-	{
-		Rules_ChangeField(1);
-		g_ChangeNum++;
-	}
-	else if ((x > 120) && (ballPawn->PositionX <= 120))
-	{
-		Rules_ChangeField(0);
-		g_ChangeNum++;
-	}
-}
-
-//-----------------------------------------------------------------------------
-// SHADOWS
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-// Initialize shadows sprites
-void InitShadows()
-{
-	u16 addr = VDP_GetSpritePatternTable() + 8 * 24;
-	loop(i, numberof(g_ShadowPattern))
-	{
-		VDP_Poke_16K(g_ShadowPattern[i], addr);
-		addr += 16;
-	}
-}
-
-//-----------------------------------------------------------------------------
-// CLOUDS
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-// Initialize cloud sprites
-void InitClouds()
-{
-	// Unpack sprite data to VRAM
-	Pletter_UnpackToVRAM(g_DataSprtExtra, VDP_GetSpritePatternTable() + 8 * 64);
-
-	// Initialize cloud sprites
-	loop(id, numberof(g_Cloud))
-	{
-		const Cloud* cloud = &g_Cloud[id];
-	
-		u8 sprt = cloud->Sprite;
-		u8 pat = cloud->Pattern;
-		SetSprite(sprt++, cloud->X, cloud->Y, pat + 0, COLOR_GRAY);
-		SetSprite(sprt,   cloud->X, cloud->Y, pat + 4, COLOR_WHITE);
-		g_CloudX[id] = cloud->X;
-	}
-}
-
-//-----------------------------------------------------------------------------
-// Update cloud sprites position
-void UpdateClouds()
-{
-	u8 frame = Game_GetFrameCount();
-	loop(id, numberof(g_Cloud))
-	{
-		const Cloud* cloud = &g_Cloud[id];
-
-		if ((frame & cloud->Mask) != 0)
-			continue;
-
-		g_CloudX[id]--;
-		u8 x = g_CloudX[id];
-		if (g_CloudX[id] == -16)
-		{
-			u8 sprt = cloud->Sprite;
-			SetSpriteColor(sprt++, COLOR_GRAY);
-			SetSpriteColor(sprt,   COLOR_WHITE);
-			x = g_CloudX[id] = 255;
-		}
-		else if (g_CloudX[id] < 0)
-		{
-			u8 sprt = cloud->Sprite;
-			SetSpriteColor(sprt++, VDP_SPRITE_EC | COLOR_GRAY);
-			SetSpriteColor(sprt,   VDP_SPRITE_EC | COLOR_WHITE);
-			x = g_CloudX[id] + 32;
-		}
-
-		u8 sprt = cloud->Sprite;
-		VDP_SetSpritePositionX(sprt++, x);
-		VDP_SetSpritePositionX(sprt,   x);
-	}
-}
-
-//-----------------------------------------------------------------------------
-// STATES
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-// Game startup state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_AppInit()
-{
-	Bios_SetKeyClick(FALSE);
-
-	Mem_Copy((u8*)&g_OptionDefault, (u8*)&g_Option, sizeof(Option)); // Set default options
-
-	// Get VDP version
-	if (Keyboard_IsKeyPressed(KEY_1)) // Force MSX1 mode if key '1' is pressed at startup
-		g_VersionVDP = VDP_VERSION_TMS9918A;
-	else if (Keyboard_IsKeyPressed(KEY_2)) // Force MSX2 mode if key '2' is pressed at startup
-		g_VersionVDP = VDP_VERSION_V9938;
-	else
-		g_VersionVDP = VDP_GetVersion();
-
-	// MSX2 specific settings
-	if (g_VersionVDP > VDP_VERSION_TMS9918A)
-	{
-		// Initialize the RTC module
-		RTC_Initialize();
-		if (!Keyboard_IsKeyPressed(KEY_3))
-			LoadOptions();
-				
-		// Initialize palette
-		ApplyPaletteOption();
-
-		// Get video frequency from VDP
-		g_FreqDetected = (VDP_GetFrequency() == VDP_FREQ_50HZ) ? FREQ_50HZ : FREQ_60HZ;
-	}
-	else // MSX1 specific settings
-	{
-		// Invalidate MSX2 only options
-		g_MenuOptions[2].Type |= MENU_ITEM_DISABLE; // Save
-		g_MenuGraph[3].Type |= MENU_ITEM_DISABLE; // Palette
-
-		// Get video frequency from BIOS
-		if (Sys_GetBASICVersion() & 0x80) // 50 Hz flag
-			g_FreqDetected = FREQ_50HZ;
-		else
-			g_FreqDetected = FREQ_60HZ;
-	}
-	ApplyFreqOption();
-	StopMusic();
-
-	Game_SetState(State_LogoInit);
-	return FALSE;
-}
-
-//-----------------------------------------------------------------------------
-// Logo initialization state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_LogoInit()
-{
-	Logo_Initialize();
-	Game_SetState(State_LogoUpdate);
-	return FALSE;
-}
-
-//-----------------------------------------------------------------------------
-// Logo update state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_LogoUpdate()
-{
-	Halt();
-
-	bool bFinish = Logo_Update();
-
-	if (bFinish || TriggerPressed())
-		Game_SetState(State_MenuInit);
-
-	return TRUE;
-}
-
-//-----------------------------------------------------------------------------
-// Menu initialization state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_MenuInit()
-{
-	// Initialize display
-	VDP_SetMode((g_VersionVDP == VDP_VERSION_TMS9918A) ? VDP_MODE_SCREEN2 : VDP_MODE_SCREEN4);
-	VDP_EnableDisplay(FALSE);
-	VDP_SetColor(COLOR_BLACK);
-	VDP_ClearVRAM();
-	VDP_RegWrite(14, 0);
-	VDP_SetSpriteFlag(VDP_SPRITE_SIZE_16);
-	
-	// Setup VRAM tables
-	VDP_SetPatternTable(VRAM_PATTERN_TABLE);
-	VDP_SetColorTable(VRAM_COLOR_TABLE);
-	VDP_SetLayoutTable(VRAM_LAYOUT_TABLE);
-	VDP_SetSpritePatternTable(VRAM_SPRITE_PATTERN);
-	VDP_SetSpriteAttributeTable(VRAM_SPRITE_ATTRIBUTE);
-	
-	// Draw background
-	DrawLevel(TRUE);
-
-	// Initialize clouds
-	VDP_HideAllSprites();
-	SetSprite(0,   2, 173, 68, COLOR_GRAY); // MSXgl
-	SetSprite(1,  18, 173, 76, COLOR_GRAY);
-	// SetSprite(2, 223, 167, 84, COLOR_GRAY); // FutureDisk
-	// SetSprite(3, 239, 167, 92, COLOR_GRAY);
-	InitClouds();
-		
-	// Initialize font
-	Print_SetTextFont(g_Font, 192);
-	for (u16 i = 192; i < 256; i++)
-	{
-		VDP_WriteVRAM_16K(g_FontColorSelect, VDP_GetColorTable() + 0x0800 + (i * 8), 8);
-		VDP_WriteVRAM_16K(g_FontColorSelect, VDP_GetColorTable() + 0x1000 + (i * 8), 8);
-	}
-	// Duplicate font patterns for shaded characters
-	VDP_WriteVRAM_16K(Print_GetFontInfo()->FontPatterns, VDP_GetPatternTable() + 0x0800 + (128 * 8), Print_GetFontInfo()->CharCount * 8);
-	VDP_WriteVRAM_16K(Print_GetFontInfo()->FontPatterns, VDP_GetPatternTable() + 0x1000 + (128 * 8), Print_GetFontInfo()->CharCount * 8);
-	for (u16 i = 128; i < 192; i++)
-	{
-		VDP_WriteVRAM_16K(g_FontColorNormal, VDP_GetColorTable() + 0x0800 + (i * 8), 8);
-		VDP_WriteVRAM_16K(g_FontColorNormal, VDP_GetColorTable() + 0x1000 + (i * 8), 8);
-	}
-
-	// Initialize the menu
-	Menu_Initialize(g_Menus);
-	Menu_SetEventCallback(MenuEventHandler);
-	Menu_SetInputCallback(MenuInputHandler);
-	Menu_DrawPage(MENU_MAIN); // Display the first page
-	
-	// Play main music
-	PlayMusic(MUSIC_MAIN);
-
-	Game_SetState(State_MenuUpdate);
-
-	VDP_EnableDisplay(TRUE);
-	return FALSE; // Frame finished
-}
-
-//-----------------------------------------------------------------------------
-// Menu update state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_MenuUpdate()
-{
-	// Update menu
-	Menu_Update();
-	UpdateClouds();
-
-	return TRUE; // Frame finished
-}
-
-//-----------------------------------------------------------------------------
-// Data initialization state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_GameInit()
-{
-	// Initialize display
-	VDP_EnableDisplay(FALSE);
-	VDP_SetColor(COLOR_BLACK);
-
-	// Play main music
-	StopMusic();
-
-	// Initialize background tiles
-	DrawLevel(FALSE);
-	CollisionInit();
-
-	// Initialize text
-	Print_SetTextFont(g_Font, 192);
-	Print_SetColor(COLOR_WHITE, COLOR_BLACK);
-	// Duplicate font patterns for shaded characters
-	VDP_WriteVRAM_16K(Print_GetFontInfo()->FontPatterns, VDP_GetPatternTable() + 0x0800 + (128 * 8), Print_GetFontInfo()->CharCount * 8);
-	VDP_WriteVRAM_16K(Print_GetFontInfo()->FontPatterns, VDP_GetPatternTable() + 0x1000 + (128 * 8), Print_GetFontInfo()->CharCount * 8);
-	for (u16 i = 128; i < 192; i++)
-	{
-		VDP_WriteVRAM_16K(g_FontColorNormal, VDP_GetColorTable() + 0x0800 + (i * 8), 8);
-		VDP_WriteVRAM_16K(g_FontColorNormal, VDP_GetColorTable() + 0x1000 + (i * 8), 8);
-	}
-
-	// Initialize sprite
-	VDP_HideAllSprites();
-	VDP_DisableSpritesFrom(SPRITE_MAX); // hide
-
-	// Init player 1 pawn (left)
-	InitPlayer(0);
-
-	// MSX2 specific settings
-	if ((g_AIGame) && (g_VersionVDP > VDP_VERSION_TMS9918A))
-	{
-		VDP_SetSpriteUniColor(SPRITE_PLY1_BLACK, COLOR_MAGENTA);
-		switch (g_Option.AILevel)
-		{
-		case AI_EASY:
-			VDP_SetPaletteEntry(COLOR_MAGENTA, RGB16(0, 0, 1));
-			break;
-		case AI_MEDIUM:
-			VDP_SetPaletteEntry(COLOR_MAGENTA, RGB16(1, 0, 1));
-			break;
-		case AI_HARD:
-			VDP_SetPaletteEntry(COLOR_MAGENTA, RGB16(1, 0, 0));
-			break;
-		}
-	}
-
-	// Init player 2 pawn (right)
-	InitPlayer(1);
-	
-	// Init ball
-	InitBall();
-	
-	// Init misc graphics
-	InitClouds();
-	InitShadows();
-	
-	Rules_Init();
-
-	VDP_EnableDisplay(TRUE);
-	// PlaySFX(SFX_SEA, ARKOS_CHANNEL_C, 0x08);
-
-	Game_SetState(State_KickOff);
-	return FALSE; // Frame finished
-}
-
-//-----------------------------------------------------------------------------
-// Kick-off state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_KickOff()
-{
-	// Init player 1 pawn (left)
-	InitPlayerPosition(0);
-	g_AIWait = 30; // If AI, wait a bit before serving
-
-	// Init player 2 pawn (right)
-	InitPlayerPosition(1);
-
-	// Init ball
-	InitBallPosition();
-
-	g_ChangeNum = 0;
-
-	Game_SetState(State_Game);
-	return FALSE; // Frame finished
-}
-
-//-----------------------------------------------------------------------------
-// Game update state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_Game()
-{
-// VDP_SetColor(COLOR_DARK_RED);
-
-	Pawn_Draw(&g_Ball.Pawn);
-	Pawn_Draw(&g_Player[0].Pawn);
-	Pawn_Draw(&g_Player[1].Pawn);
-
-// VDP_SetColor(COLOR_DARK_BLUE);
-
-	UpdatePlayer(&g_Player[0]);
-	UpdatePlayer(&g_Player[1]);
-	UpdateBall();
-	UpdateClouds();
-
-// VDP_SetColor(COLOR_DARK_GREEN);
-
-	// Update input
-	g_Player[0].Input = g_InputCheck1();
-	g_Player[1].Input = g_InputCheck2();
-	
-	if (Keyboard_IsKeyPressed(KEY_ESC))
-		Game_SetState(State_MenuInit);
-
-// VDP_SetColor(COLOR_BLACK);
-
-	return TRUE; // Frame finished
-}
-
-//-----------------------------------------------------------------------------
-// Pause state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_Pause()
-{
-	Game_SetState(State_Game);
-	return TRUE; // Frame finished
-}
-
-//-----------------------------------------------------------------------------
-// Point won state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_Point()
-{
-	Pawn_SetDirty(&g_Ball.Pawn);
-	Pawn_Draw(&g_Ball.Pawn);
-	Pawn_SetDirty(&g_Player[0].Pawn);
-	Pawn_Draw(&g_Player[0].Pawn);
-	Pawn_SetDirty(&g_Player[1].Pawn);
-	Pawn_Draw(&g_Player[1].Pawn);
-
-	Pawn_Update(&g_Ball.Pawn);
-	Pawn_Update(&g_Player[0].Pawn);
-	Pawn_Update(&g_Player[1].Pawn);
-	UpdateClouds();
-
-	g_StateTimer--;
-	if ((g_StateTimer == 0) || TriggerPressed())
-	{
-		ClearInfo();
-		VDP_SetColor(COLOR_BLACK);
-		Rules_ChangeField(1 - g_Victorious);
-		Game_SetState(State_KickOff);
-	}
-
-	return TRUE; // Frame finished
-}
-
-//-----------------------------------------------------------------------------
-// Victory scene initialization state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_VictoryInit()
-{
-	g_StateTimer = 500;
-
-	#if (1)
-	Pawn_SetPosition(&g_Player[0].Pawn, g_Player[0].Pawn.PositionX, 168);
-	Pawn_SetPosition(&g_Player[1].Pawn, g_Player[1].Pawn.PositionX, 168);
-	#else
-	Pawn_SetPosition(&g_Player[0].Pawn, g_Player[0].Pawn.PositionX, Q4_4_SET(168));
-	Pawn_SetPosition(&g_Player[1].Pawn, g_Player[1].Pawn.PositionX, Q4_4_SET(168));
-	#endif
-
-	Pawn_SetEnable(&g_Ball.Pawn, FALSE);
-	Pawn_ForceSetAction(&g_Player[1 - g_Victorious].Pawn, ACTION_PLAYER_LOOSE);
-
-	Pawn* winner = &g_Player[g_Victorious].Pawn;
-	Pawn_ForceSetAction(winner, ACTION_PLAYER_WIN);
-	SetSprite(SPRITE_WIN_BACK,  winner->PositionX, winner->PositionY - 24, 112, COLOR_LIGHT_RED);
-	SetSprite(SPRITE_WIN_FRONT, winner->PositionX, winner->PositionY - 24, 116, COLOR_DARK_RED);
-	
-	PlayMusic(MUSIC_VICTORY);
-	PlaySFX(SFX_CUICUI, ARKOS_CHANNEL_C, 0x0F);
-	ClearInfo();
-
-	Game_SetState(State_VictoryUpdate);
-	return FALSE; // Frame finished
-}
-
-//-----------------------------------------------------------------------------
-// Victory scene update state
-//
-// Return:
-//   TRUE if frame is finished, FALSE to continue processing
-bool State_VictoryUpdate()
-{
-	Pawn_SetDirty(&g_Player[0].Pawn);
-	Pawn_Draw(&g_Player[0].Pawn);
-	
-	Pawn_SetDirty(&g_Player[1].Pawn);
-	Pawn_Draw(&g_Player[1].Pawn);
-
-	Pawn_Update(&g_Player[0].Pawn);
-	Pawn_Update(&g_Player[1].Pawn);
-	UpdateClouds();
-
-	if (Game_GetFrameCount() & 0b00010000)
-	{
-		VDP_SetSpritePositionY(SPRITE_WIN_BACK, g_Player[g_Victorious].Pawn.PositionY - 24);
-		VDP_SetSpritePositionY(SPRITE_WIN_FRONT, g_Player[g_Victorious].Pawn.PositionY - 24);
-	}
-	else
-	{
-		VDP_HideSprite(SPRITE_WIN_BACK);
-		VDP_HideSprite(SPRITE_WIN_FRONT);
-	}
-
-	g_StateTimer--;
-	if ((g_StateTimer == 0) || Keyboard_IsKeyPressed(KEY_ESC))
-	{
-		StopMusic();
-		Game_SetState(State_MenuInit);
-	}
-
-	return TRUE; // Frame finished
-}
-
-//=============================================================================
-// INTERRUPTION
-//=============================================================================
-
-//-----------------------------------------------------------------------------
-// Vertical synchronization callback (always synchronized at 50 Hz)
-void VSynch()
-{
-	if (g_NextMusic != 0xFF)
-	{
-		if (g_NextMusic != g_CurrentMusic)
-		{
-			// Load music data
-			Pletter_UnpackToRAM((const void *)g_MusicTable[g_NextMusic], (void *)MUSIC_ADDRESS);
-			AKM_Init((const void *)MUSIC_ADDRESS, 0);
-	
-			// Load SFX data
-			Pletter_UnpackToRAM((const void *)g_SoundFX, (void *)SFX_ADDRESS);
-			AKM_InitSFX((const void *)SFX_ADDRESS);
-	
-			g_CurrentMusic = g_NextMusic;
-		}
-		if (g_Option.SFX)
-		{
-			loop (i, 3)
-			{
-				if (g_NextSFX[i] != 0xFF)
-				{
-					AKM_PlaySFX(g_NextSFX[i], i, 0xF - g_NextSFXVol[i]);
-					g_NextSFX[i] = 0xFF;
-				}
-			}
-		}
-	
-		AKM_Decode();
-	}
-}
-
-//=============================================================================
-// MAIN LOOP
-//=============================================================================
-
-//-----------------------------------------------------------------------------
-// Programme entry point
-void main()
-{
-	// Start game loop
-	Game_SetVSyncCallback(VSynch);
-	Game_SetState(State_AppInit);
-	Game_Start(VDP_MODE_SCREEN2, g_FreqCurrent == FREQ_60HZ);
+/* ============================================================
+   GAME STATE
+   ============================================================ */
+typedef void (*StateFn)(void);
+
+static u8        g_state_timer;
+static StateFn   g_current_state;
+static u16       g_frame_count;
+static bool      g_display_dirty;   /* redraw BG next frame */
+
+static Character g_player[2];
+static Character g_ball;
+static bool      g_ball_hit;        /* ball hit a player this frame  */
+static u8        g_ball_ground_x;   /* AI prediction of ball landing */
+
+/* Rules */
+static u8  g_field;        /* 0=left serves, 1=right serves         */
+static u8  g_bounce_num;   /* ground bounces in current point       */
+static u8  g_dribble_num;  /* player-touch count in current point   */
+static u8  g_change_num;   /* side-changes in current point         */
+static u8  g_last_touch;   /* last player to touch ball (0 or 1)   */
+static u8  g_victorious;   /* winner's ID                           */
+static u8  g_game_points;  /* points to win (default 11)            */
+static u8  g_max_bounce;   /* max ground bounces (default 1)        */
+static u8  g_max_dribble;  /* max consecutive touches (default 3)   */
+static u8  g_ai_wait;      /* frames to wait before AI serves       */
+
+/* Game modes */
+static bool g_ai_game;     /* TRUE = single-player vs CPU           */
+
+/* Score event */
+#define SCORE_OUT     0
+#define SCORE_BOUNCE  1
+#define SCORE_DRIBBLE 2
+
+/* Menu state */
+static u8  g_menu_sel;
+static u8  g_menu_page;    /* 0=main, 1=versus, 2=solo, 3=options   */
+static bool g_prev_start;
+
+/* Joypad debounce */
+static u16 g_prev_keys;
+static u16 g_pressed_keys;  /* keys newly pressed this frame         */
+
+/* ============================================================
+   FORWARD DECLARATIONS
+   ============================================================ */
+static void state_menu_init(void);
+static void state_menu(void);
+static void state_game_init(void);
+static void state_kickoff(void);
+static void state_game(void);
+static void state_point(void);
+static void state_victory_init(void);
+static void state_victory(void);
+
+/* ============================================================
+   PSG SOUND (direct SN76489 register writes)
+   Port 0x7F: latch/data byte
+     Latch: 1RRccCCC — RR=register(tone/noise/vol), cc=channel, CCC=data bits
+     Data:  0xDDDDDD — extended data
+   ============================================================ */
+static void psg_out(u8 val) {
+    __asm
+        ld a, 4 (ix)
+        out (0x7F), a
+    __endasm;
+    val;
+}
+/* Silence all channels */
+static void psg_silence(void) {
+    psg_out(0x9F);   /* ch0 vol=0 */
+    psg_out(0xBF);   /* ch1 vol=0 */
+    psg_out(0xDF);   /* ch2 vol=0 */
+    psg_out(0xFF);   /* noise vol=0 */
+}
+/* Play a short tone burst: channel 0-2, period (0-1023), vol 0-15, frames */
+static u8  g_sfx_ch;
+static u16 g_sfx_period;
+static u8  g_sfx_vol;
+static u8  g_sfx_frames;
+
+static void psg_play_sfx(u8 period_lo, u8 period_hi, u8 vol, u8 frames) {
+    /* channel 0 for SFX */
+    psg_out((u8)(0x80 | (period_lo & 0x0F)));          /* tone ch0 low nibble */
+    psg_out((u8)(period_hi & 0x3F));                    /* tone ch0 high 6 bits */
+    psg_out((u8)(0x90 | (15 - (vol & 0x0F))));         /* ch0 volume */
+    g_sfx_frames = frames;
+}
+
+static void psg_update(void) {
+    if (g_sfx_frames > 0) {
+        g_sfx_frames--;
+        if (g_sfx_frames == 0) psg_out(0x9F);  /* silence ch0 */
+    }
+}
+
+/* SFX helpers */
+#define SFX_JUMP()   psg_play_sfx(0x1E, 0x00, 12, 6)   /* high short tone  */
+#define SFX_LAND()   psg_play_sfx(0x3C, 0x00, 10, 4)   /* mid short tone   */
+#define SFX_BUMP()   psg_play_sfx(0x0F, 0x00, 14, 5)   /* high click       */
+#define SFX_SCORE()  psg_play_sfx(0x06, 0x00, 14, 12)  /* rising tone      */
+#define SFX_CLICK()  psg_play_sfx(0x3C, 0x00,  8, 3)   /* quiet click      */
+
+/* ============================================================
+   TEXT / BG RENDERING HELPERS
+   ============================================================ */
+static void bg_put_tile(u8 x, u8 y, u16 tile) {
+    SMS_setNextTileatXY(x, y);
+    SMS_setTile(tile);
+}
+
+static void bg_print(u8 x, u8 y, const char *str) {
+    u8 cx = x;
+    while (*str) {
+        u8 ch = (u8)*str;
+        u16 tile = (u16)(BG_TILE_FONT_BASE + (ch - 32));
+        bg_put_tile(cx, y, tile | TILE_USE_SPRITE_PALETTE | TILE_PRIORITY);
+        cx++;
+        str++;
+    }
+}
+
+static void bg_print_hi(u8 x, u8 y, const char *str) {
+    /* Print with different color (inverse — uses BG palette's color 12=red) */
+    u8 cx = x;
+    while (*str) {
+        u8 ch = (u8)*str;
+        u16 tile = (u16)(BG_TILE_FONT_BASE + (ch - 32));
+        bg_put_tile(cx, y, tile | TILE_PRIORITY);
+        cx++;
+        str++;
+    }
+}
+
+/* Print a decimal number (0-99) at position */
+static void bg_print_num2(u8 x, u8 y, u8 n) {
+    char buf[3];
+    buf[0] = '0' + (n / 10);
+    buf[1] = '0' + (n % 10);
+    buf[2] = '\0';
+    bg_print(x, y, buf);
+}
+
+/* Fill a rectangle with a tile */
+static void bg_fill_rect(u8 x, u8 y, u8 w, u8 h, u16 tile) {
+    u8 r, c;
+    for (r = 0; r < h; r++) {
+        for (c = 0; c < w; c++) {
+            bg_put_tile(x + c, y + r, tile);
+        }
+    }
+}
+
+/* ============================================================
+   COURT / BACKGROUND LAYOUT
+   Tile rows:
+     0       = score bar (10 px = tile row 0)
+     1-2     = sky dark  (y 8-23)
+     3-5     = sky mid   (y 24-47)
+     6-10    = sky light (y 48-87)
+     11      = horizon   (y 88-95)
+     12-21   = court     (y 96-175)
+     22      = court line (y 176)
+     23      = dirt       (y 184)
+   ============================================================ */
+static void draw_court(void) {
+    u8 y;
+
+    /* Row 0: score bar */
+    bg_fill_rect(0, 0, 32, 1, BG_TILE_SCORE_BG);
+
+    /* Rows 1-2: dark sky */
+    bg_fill_rect(0, 1, 32, 2, BG_TILE_SKY_DARK);
+
+    /* Rows 3-5: mid sky */
+    bg_fill_rect(0, 3, 32, 3, BG_TILE_SKY_MID);
+
+    /* Rows 6-10: light sky */
+    bg_fill_rect(0, 6, 32, 5, BG_TILE_SKY_LIGHT);
+
+    /* Row 11: horizon */
+    bg_fill_rect(0, 11, 32, 1, BG_TILE_HORIZON);
+
+    /* Rows 12-21: court body */
+    bg_fill_rect(0, 12, 32, 10, BG_TILE_COURT_BODY);
+
+    /* Row 22: court top line */
+    bg_fill_rect(0, 22, 32, 1, BG_TILE_COURT_LINE);
+
+    /* Row 23: dirt */
+    bg_fill_rect(0, 23, 32, 1, BG_TILE_DIRT);
+
+    /* Net (columns 15-16, rows 12-22) */
+    for (y = 12; y <= 16; y++) {
+        bg_put_tile(15, y, BG_TILE_NET_TOP);
+        bg_put_tile(16, y, BG_TILE_NET_TOP);
+    }
+    for (y = 17; y <= 22; y++) {
+        bg_put_tile(15, y, BG_TILE_NET_MID);
+        bg_put_tile(16, y, BG_TILE_NET_MID);
+    }
+}
+
+static void draw_score(void) {
+    /* Left score at column 12, right score at column 17 */
+    bg_print_num2(12, 0, g_player[0].score);
+    bg_print(14, 0, "-");
+    bg_print_num2(16, 0, g_player[1].score);
+}
+
+static void clear_info(void) {
+    bg_fill_rect(8, 15, 16, 1, BG_TILE_COURT_BODY);
+}
+
+static void draw_info(u8 event) {
+    const char *msg = "";
+    if (event == SCORE_OUT) {
+        if (g_dribble_num == 0 && g_bounce_num == 0)      msg = "   OUT!   ";
+        else if (g_dribble_num == 0 && g_change_num == 1) msg = "   ACE!   ";
+        else                                                msg = " PASSING! ";
+    } else {
+        msg = "  FAULT!  ";
+    }
+    bg_print(8, 15, msg);
+}
+
+/* ============================================================
+   ANIMATION SYSTEM
+   ============================================================ */
+static void anim_set_action(Character *c, u8 action, bool force) {
+    if (!force && c->anim_action == action) return;
+    if (!force && c->anim_done) return;   /* non-looping anims play to end */
+    c->anim_action = action;
+    c->anim_key    = 0;
+    c->anim_done   = FALSE;
+    c->anim_timer  = g_anims[action].keys[0].dur;
+    c->anim_frame  = g_anims[action].keys[0].frame;
+}
+
+static void anim_update_player(Character *c) {
+    const AnimDef *anim = &g_anims[c->anim_action];
+    if (c->anim_done) return;
+    if (c->anim_timer > 0) {
+        c->anim_timer--;
+        return;
+    }
+    /* Advance to next key */
+    c->anim_key++;
+    if (c->anim_key >= anim->n) {
+        if (anim->loop) {
+            c->anim_key = 0;
+        } else {
+            c->anim_key = anim->n - 1;
+            c->anim_done = TRUE;
+        }
+    }
+    c->anim_frame = anim->keys[c->anim_key].frame;
+    c->anim_timer = anim->keys[c->anim_key].dur;
+}
+
+static void anim_update_ball(Character *b) {
+    const AnimDef *anim = &g_ballAnims[b->anim_action];
+    if (b->anim_done) return;
+    if (b->anim_timer > 0) {
+        b->anim_timer--;
+        return;
+    }
+    b->anim_key++;
+    if (b->anim_key >= anim->n) {
+        if (anim->loop) {
+            b->anim_key = 0;
+        } else {
+            b->anim_key = anim->n - 1;
+            b->anim_done = TRUE;
+            /* After bump, return to idle */
+            b->anim_action = 0;
+            b->anim_key    = 0;
+            b->anim_done   = FALSE;
+            b->anim_frame  = g_ballAnims[0].keys[0].frame;
+            b->anim_timer  = g_ballAnims[0].keys[0].dur;
+            return;
+        }
+    }
+    b->anim_frame = anim->keys[b->anim_key].frame;
+    b->anim_timer = anim->keys[b->anim_key].dur;
+}
+
+static void ball_set_bump(Character *b) {
+    if (b->anim_action != 1) {
+        b->anim_action = 1;
+        b->anim_key    = 0;
+        b->anim_done   = FALSE;
+        b->anim_frame  = g_ballAnims[1].keys[0].frame;
+        b->anim_timer  = g_ballAnims[1].keys[0].dur;
+    }
+}
+
+/* ============================================================
+   SPRITE RENDERING
+   Uses 8×16 sprite mode. Each 16×16 character = 2 sprite entries.
+   ============================================================ */
+static void draw_player_sprite(u8 x, u8 y, u8 frame, u8 p2) {
+    /* In 8×16 mode, SMS_addSprite uses pairs: tile_n (top) + tile_n+1 (bottom)
+       For a 16×16 char:
+         Left  sprite: tiles [frame*4 + 0] and [frame*4 + 1]
+         Right sprite: tiles [frame*4 + 2] and [frame*4 + 3]
+       We call SMS_addSprite with even tile index (top of pair). */
+    u8 base = (u8)(p2 ? SPR_PLY2_BASE : SPR_PLY1_BASE);
+    u8 tl = (u8)(base + frame * 4);       /* top-left tile (even, top of left pair)  */
+    u8 tr = (u8)(base + frame * 4 + 2);   /* top-right tile (even, top of right pair) */
+    if (y < 192) {
+        SMS_addSprite(x,     (u8)(y - 1), tl);
+        SMS_addSprite(x + 8, (u8)(y - 1), tr);
+    }
+}
+
+static void draw_ball_sprite(u8 x, u8 y, u8 frame) {
+    u8 tl = (u8)(SPR_BALL_BASE + frame * 4);
+    u8 tr = (u8)(SPR_BALL_BASE + frame * 4 + 2);
+    if (y < 192) {
+        SMS_addSprite(x,     (u8)(y - 1), tl);
+        SMS_addSprite(x + 8, (u8)(y - 1), tr);
+    }
+}
+
+/* Shadow size based on character height (how far from ground) */
+static u8 shadow_tile_for_y(u8 char_y) {
+    i8 dist = (i8)(GROUND_Y - (i8)char_y);
+    if (dist <= 8)  return (u8)(SPR_SHADOW_BASE + 0);
+    if (dist <= 20) return (u8)(SPR_SHADOW_BASE + 1);
+    if (dist <= 40) return (u8)(SPR_SHADOW_BASE + 2);
+    return (u8)(SPR_SHADOW_BASE + 3);
+}
+
+static void draw_shadow(u8 x, u8 char_y) {
+    u8 tile = shadow_tile_for_y(char_y);
+    /* Shadow always at ground level, 8×8 (8×16 mode but tile is 1 tile of shadow) */
+    SMS_addSprite(x, 182, tile);
+}
+
+/* ============================================================
+   PHYSICS / MOVEMENT
+   Replicates the MSX Pawn physics system behaviour.
+   ============================================================ */
+static void move_character(Character *c, i8 dx, i8 dy) {
+    i16 nx = (i16)c->pos_x + dx;
+    i16 ny = (i16)c->pos_y + dy;
+    bool collided_y = FALSE;
+
+    /* --- Vertical (dy) --- */
+    if (dy > 0) {  /* Moving down */
+        if ((i16)(ny + 16) >= SCREEN_H) {
+            /* Bottom border */
+            ny = (i16)(SCREEN_H - 16);
+            c->vel_y = 0;
+            collided_y = TRUE;
+        } else {
+            /* Ground */
+            if ((i16)(ny + 16) >= (GROUND_Y + 8)) {
+                ny = (i16)(GROUND_Y);
+                c->vel_y = 0;
+                collided_y = TRUE;
+            } else {
+                /* Net collision (vertical) */
+                /* Ball check: if at net X range */
+                if (c->id == 0xFF) {   /* ball only: no vertical net block */
+                }
+            }
+        }
+        if (collided_y && c->in_air) {
+            c->in_air = FALSE;
+            if (c->id != 0xFF) SFX_LAND();
+        }
+    } else if (dy < 0) {
+        if (ny < 0) { ny = 0; c->vel_y = 0; }
+    }
+
+    /* --- Check falling (no ground below) --- */
+    if (!collided_y && !c->in_air && dy >= 0) {
+        if ((i16)(ny + 16) < GROUND_Y + 4) {
+            /* No ground detected: begin fall */
+            c->in_air = TRUE;
+            if (c->vel_y == 0) c->vel_y = 0;
+        }
+    }
+
+    /* --- Horizontal (dx) --- */
+    if (dx != 0) {
+        /* Left/right borders */
+        if (nx < 0) {
+            nx = 0;
+            if (c->id == 0xFF) { c->vel_x = (i8)(-c->vel_x); nx = 0; }
+        } else if ((i16)(nx + 16) > SCREEN_W) {
+            nx = (i16)(SCREEN_W - 16);
+            if (c->id == 0xFF) { c->vel_x = (i8)(-c->vel_x); nx = (i16)(SCREEN_W - 16); }
+        }
+
+        /* Net collision (horizontal) — only for ball */
+        if (c->id == 0xFF) {
+            i16 bx_new_right = nx + 15;
+            i16 bx_new_left  = nx;
+            i16 bx_old_right = (i16)c->pos_x + 15;
+            i16 bx_old_left  = (i16)c->pos_x;
+            i16 by_bot = ny + 15;
+
+            if (by_bot >= NET_TOP_Y) {
+                /* Moving right: hit left wall of net */
+                if (dx > 0 && bx_old_right < NET_X_LEFT && bx_new_right >= NET_X_LEFT) {
+                    nx = (i16)(NET_X_LEFT - 16);
+                    c->vel_x = (i8)(-c->vel_x);
+                }
+                /* Moving left: hit right wall of net */
+                if (dx < 0 && bx_old_left >= NET_X_RIGHT && bx_new_left < NET_X_RIGHT) {
+                    nx = (i16)NET_X_RIGHT;
+                    c->vel_x = (i8)(-c->vel_x);
+                }
+            }
+        } else {
+            /* Player net wall: stop player at net */
+            i16 px_right = nx + 15;
+            i16 px_left  = nx;
+            i16 old_right = (i16)c->pos_x + 15;
+            i16 old_left  = (i16)c->pos_x;
+            if (dx > 0 && old_right < NET_X_LEFT && px_right >= NET_X_LEFT)
+                nx = (i16)(NET_X_LEFT - 16);
+            if (dx < 0 && old_left >= NET_X_RIGHT && px_left < NET_X_RIGHT)
+                nx = (i16)NET_X_RIGHT;
+        }
+    }
+
+    c->pos_x = (u8)nx;
+    c->pos_y = (u8)ny;
+}
+
+/* Apply sub-pixel velocity to character (same accumulation as MSX original) */
+static void apply_velocity(Character *c) {
+    i8 dx, dy;
+
+    dx = Q4_4_GET(c->vel_x);
+    c->rest_x += (i8)(c->vel_x - dx);
+    dx += Q4_4_GET(c->rest_x);
+    c->rest_x = Q4_4_FRAC(c->rest_x);
+
+    dy = Q4_4_GET(c->vel_y);
+    c->rest_y += (i8)(c->vel_y - dy);
+    dy += Q4_4_GET(c->rest_y);
+    c->rest_y = Q4_4_FRAC(c->rest_y);
+
+    move_character(c, dx, dy);
+}
+
+/* ============================================================
+   RULES ENGINE  (identical logic to MSX original)
+   ============================================================ */
+static void rules_change_field(u8 field) {
+    g_field       = field;
+    g_bounce_num  = 0;
+    g_dribble_num = 0;
+}
+
+static void rules_init(void) {
+    g_player[0].score = 0;
+    g_player[1].score = 0;
+    draw_score();
+    rules_change_field(g_ai_game ? 1 : 0);
+}
+
+static void rules_score(u8 ply, u8 event) {
+    g_victorious = ply;
+    g_player[ply].score++;
+    draw_score();
+    draw_info(event);
+    SFX_SCORE();
+    if (g_player[ply].score >= g_game_points &&
+        g_player[ply].score > g_player[1 - ply].score + 1) {
+        g_current_state = state_victory_init;
+    } else {
+        g_state_timer   = 60;
+        g_current_state = state_point;
+    }
+}
+
+static void rules_bounce(void) {
+    g_bounce_num++;
+    if (g_max_bounce != 0 && g_bounce_num > g_max_bounce)
+        rules_score((u8)(1 - g_field), SCORE_BOUNCE);
+    g_last_touch = g_field;
+}
+
+static void rules_dribble(void) {
+    g_dribble_num++;
+    if (g_max_dribble != 0 && g_dribble_num > g_max_dribble)
+        rules_score((u8)(1 - g_field), SCORE_DRIBBLE);
+    g_last_touch = g_field;
+}
+
+static void rules_out(void) {
+    rules_score((u8)(1 - g_last_touch), SCORE_OUT);
+}
+
+/* ============================================================
+   AI INPUT  (identical to MSX)
+   ============================================================ */
+static u8 ai_predict_medium(void) {
+    i16 hit_x = (i16)g_ball.pos_x +
+                Q4_4_GET((i8)(g_ball.vel_x * (i8)((168 - g_ball.pos_y) / 3)));
+    if (hit_x < 0)   hit_x = 0;
+    if (hit_x > 255) hit_x = 255;
+    return (u8)hit_x;
+}
+
+static u8 check_ai_input(void) {
+    u8 ball_x  = g_ball.pos_x;
+    u8 ball_y  = g_ball.pos_y;
+    u8 ply_x   = g_player[0].pos_x;
+
+    /* Serve */
+    if (ball_x < 128 && g_ball.freeze) {
+        if (g_ai_wait > 0) { g_ai_wait--; return INPUT_NONE; }
+        if (ply_x < 40) return (u8)(INPUT_ACTION | INPUT_RIGHT);
+        return INPUT_LEFT;
+    }
+
+    g_ball_ground_x = ai_predict_medium();
+
+    /* Reposition when ball is on far side */
+    if (ball_x > 128 && g_ball_ground_x > 128) {
+        if (ply_x < 32) return INPUT_RIGHT;
+        if (ply_x > 64) return INPUT_LEFT;
+        return INPUT_NONE;
+    }
+
+    /* Shoot */
+    {
+        i8 dx = (i8)(g_ball_ground_x - ply_x);
+        i8 sx = (i8)(ball_x - ply_x);
+        if (dx > 0 && sx < 24 && ball_x < 128 && ball_y > 128) {
+            if (sx > 12) return (u8)(INPUT_ACTION | INPUT_RIGHT);
+            return INPUT_ACTION;
+        }
+    }
+
+    /* Reception */
+    if (ply_x < g_ball_ground_x) return INPUT_RIGHT;
+    return INPUT_LEFT;
+}
+
+/* ============================================================
+   JOYPAD INPUT
+   ============================================================ */
+static u8 read_player_input(u8 id) {
+    u16 keys;
+    u8 ret = INPUT_NONE;
+
+    if (id == 0) {
+        keys = SMS_getKeysStatus();
+        if (keys & PORT_A_KEY_LEFT)  ret |= INPUT_LEFT;
+        if (keys & PORT_A_KEY_RIGHT) ret |= INPUT_RIGHT;
+        if (keys & PORT_A_KEY_1)     ret |= INPUT_ACTION;
+        if (keys & PORT_A_KEY_2)     ret |= INPUT_ACTION;
+        if (keys & PORT_A_KEY_UP)    ret |= INPUT_ACTION;
+    } else {
+        keys = SMS_getKeysStatus();
+        if (keys & PORT_B_KEY_LEFT)  ret |= INPUT_LEFT;
+        if (keys & PORT_B_KEY_RIGHT) ret |= INPUT_RIGHT;
+        if (keys & PORT_B_KEY_1)     ret |= INPUT_ACTION;
+        if (keys & PORT_B_KEY_2)     ret |= INPUT_ACTION;
+        if (keys & PORT_B_KEY_UP)    ret |= INPUT_ACTION;
+    }
+    return ret;
+}
+
+/* ============================================================
+   PLAYER UPDATE  (identical logic to MSX original)
+   ============================================================ */
+static void update_player(Character *ply) {
+    u8 act;
+
+    /* Horizontal movement */
+    if (ply->input & INPUT_RIGHT) {
+        ply->vel_x += MOVE_ACCEL;
+        ply->moving = TRUE;
+    } else if (ply->input & INPUT_LEFT) {
+        ply->vel_x -= MOVE_ACCEL;
+        ply->moving = TRUE;
+    } else {
+        ply->vel_x = 0;
+        ply->moving = FALSE;
+    }
+    /* Clamp speed */
+    if (ply->vel_x >  MOVE_MAX_SPEED) ply->vel_x = MOVE_MAX_SPEED;
+    if (ply->vel_x < -MOVE_MAX_SPEED) ply->vel_x = (i8)(-MOVE_MAX_SPEED);
+
+    /* Vertical */
+    if (ply->in_air) {
+        ply->vel_y += GRAVITY;
+        if (ply->vel_y > FALL_MAX_SPEED) ply->vel_y = FALL_MAX_SPEED;
+    } else if (ply->input & INPUT_ACTION) {
+        SFX_JUMP();
+        ply->in_air = TRUE;
+        ply->vel_y  = JUMP_FORCE;
+    } else {
+        ply->vel_y = 0;
+    }
+
+    /* Animation action */
+    if (ply->in_air && ply->vel_y < 0) act = ACTION_JUMP;
+    else if (ply->in_air)              act = ACTION_FALL;
+    else if (ply->moving)              act = ACTION_MOVE;
+    else                               act = ACTION_IDLE;
+
+    anim_set_action(ply, act, FALSE);
+    anim_update_player(ply);
+
+    /* Physics */
+    apply_velocity(ply);
+}
+
+/* ============================================================
+   BALL UPDATE  (identical logic to MSX original)
+   ============================================================ */
+static void update_ball(void) {
+    u8 old_x;
+    Character *ply;
+    i8 dx, dy;
+    u16 sq_dist;
+
+    /* Gravity */
+    g_ball.vel_y += BALL_GRAVITY;
+    if (g_ball.vel_y > FALL_MAX_SPEED) g_ball.vel_y = FALL_MAX_SPEED;
+
+    /* Select nearest player */
+    ply = (g_ball.pos_x < 128 - 8) ? &g_player[0] : &g_player[1];
+
+    /* Ball–player collision */
+    dx = (i8)(g_ball.pos_x - ply->pos_x);
+    dy = (i8)(g_ball.pos_y - ply->pos_y);
+    sq_dist = (u16)((i16)dx * dx + (i16)dy * dy);
+
+    if (sq_dist < (u16)(COL_DIST * COL_DIST)) {
+        if (!g_ball_hit) {
+            g_ball_hit = TRUE;
+            SFX_BUMP();
+            rules_dribble();
+        }
+        g_ball.vel_x = (i8)(dx * 2);
+        g_ball.vel_x += (i8)(ply->vel_x / 2);
+        g_ball.vel_y  = Q4_4_SET(-1.5f);
+        if (ply->vel_y < 0) g_ball.vel_y += (i8)(ply->vel_y / 2);
+        g_ball.freeze = FALSE;
+        ball_set_bump(&g_ball);
+        anim_set_action(ply, ACTION_HIT, TRUE);
+    } else {
+        g_ball_hit = FALSE;
+    }
+
+    /* Ground bounce detection — before moving */
+    old_x = g_ball.pos_x;
+
+    /* Physics move (also handles ground/net/border events) */
+    if (!g_ball.freeze) {
+        i8 dx2, dy2;
+        dx2 = Q4_4_GET(g_ball.vel_x);
+        g_ball.rest_x += (i8)(g_ball.vel_x - dx2);
+        dx2 += Q4_4_GET(g_ball.rest_x);
+        g_ball.rest_x = Q4_4_FRAC(g_ball.rest_x);
+
+        dy2 = Q4_4_GET(g_ball.vel_y);
+        g_ball.rest_y += (i8)(g_ball.vel_y - dy2);
+        dy2 += Q4_4_GET(g_ball.rest_y);
+        g_ball.rest_y = Q4_4_FRAC(g_ball.rest_y);
+
+        /* Check for border out before moving */
+        {
+            i16 nx = (i16)g_ball.pos_x + dx2;
+            if (nx < 0 || (i16)(nx + 16) > SCREEN_W) {
+                rules_out();
+                return;
+            }
+        }
+
+        move_character(&g_ball, dx2, dy2);
+
+        /* Ground bounce */
+        if (!g_ball.in_air && g_ball.pos_y >= GROUND_Y - 2) {
+            g_ball.vel_y = (i8)(-g_ball.vel_y);
+            g_ball.pos_y  = (u8)(GROUND_Y - 2);
+            g_ball.in_air = TRUE;
+            ball_set_bump(&g_ball);
+            SFX_BUMP();
+            if (g_ball.pos_y > BALL_GROUND_Y)
+                rules_bounce();
+        }
+    }
+
+    anim_update_ball(&g_ball);
+
+    /* Field change detection */
+    if ((old_x <= 120) && (g_ball.pos_x > 120)) {
+        rules_change_field(1);
+        g_change_num++;
+    } else if ((old_x > 120) && (g_ball.pos_x <= 120)) {
+        rules_change_field(0);
+        g_change_num++;
+    }
+}
+
+/* ============================================================
+   CHARACTER INIT
+   ============================================================ */
+static void init_player(u8 id) {
+    Character *p = &g_player[id];
+    u8 i;
+    /* Zero the structure */
+    for (i = 0; i < sizeof(Character); i++) ((u8*)p)[i] = 0;
+    p->id         = id;
+    p->pos_x      = (id == 0) ? 32 : (u8)(255u - 32u - 16u);
+    p->pos_y      = GROUND_Y;
+    p->in_air     = FALSE;
+    p->anim_frame = g_anims[ACTION_IDLE].keys[0].frame;
+    p->anim_timer = g_anims[ACTION_IDLE].keys[0].dur;
+}
+
+static void init_ball(void) {
+    u8 i;
+    for (i = 0; i < sizeof(Character); i++) ((u8*)&g_ball)[i] = 0;
+    g_ball.id     = 0xFF;   /* sentinel: not a player */
+    g_ball.pos_x  = (g_field == 0) ? 56 : 184;
+    g_ball.pos_y  = 128;
+    g_ball.freeze = TRUE;
+    g_ball.in_air = TRUE;
+    g_ball.anim_frame = g_ballAnims[0].keys[0].frame;
+    g_ball.anim_timer = g_ballAnims[0].keys[0].dur;
+    g_ball_hit    = FALSE;
+}
+
+/* ============================================================
+   MENU SYSTEM
+   ============================================================ */
+/* Pages */
+#define PAGE_MAIN    0
+#define PAGE_VERSUS  1
+#define PAGE_SOLO    2
+#define PAGE_OPTIONS 3
+
+/* Menu item strings per page */
+static const char *g_main_items[]   = { "PLY VS PLY", "PLY VS CPU", "OPTIONS   " };
+static const char *g_versus_items[] = { "START >   ", "P1: PORT A", "P2: PORT B", "BACK      " };
+static const char *g_solo_items[]   = { "START >   ", "CTRL:PTR A", "BACK      " };
+static const char *g_opt_items[]    = { "POINTS:   ", "BOUNCES:  ", "DRIBBLES: ", "BACK      " };
+
+static u8 g_menu_num_items[] = { 3, 4, 3, 4 };
+
+static void draw_menu_page(void) {
+    /* Select items array for the current page (avoid non-const pointer array) */
+    const char **items;
+    u8 i, num = g_menu_num_items[g_menu_page];
+    u8 start_row = 6;
+    switch (g_menu_page) {
+        case PAGE_VERSUS:  items = g_versus_items; break;
+        case PAGE_SOLO:    items = g_solo_items;   break;
+        case PAGE_OPTIONS: items = g_opt_items;    break;
+        default:           items = g_main_items;   break;
+    }
+
+    /* Clear menu area */
+    bg_fill_rect(7, start_row, 18, 14, BG_TILE_SKY_DARK);
+
+    /* Title */
+    bg_print(10, 4, "PENGPONG");
+
+    for (i = 0; i < num; i++) {
+        if (i == g_menu_sel)
+            bg_print_hi(8, (u8)(start_row + i * 2), "> ");
+        else
+            bg_print   (8, (u8)(start_row + i * 2), "  ");
+        bg_print(10, (u8)(start_row + i * 2), items[i]);
+    }
+
+    /* Show values for options page */
+    if (g_menu_page == PAGE_OPTIONS) {
+        char buf[4];
+        buf[0] = '0' + g_game_points / 10;
+        buf[1] = '0' + g_game_points % 10;
+        buf[2] = '\0';
+        bg_print(21, start_row + 0, buf);
+        buf[0] = '0' + g_max_bounce;
+        buf[1] = '\0';
+        bg_print(21, start_row + 2, buf);
+        buf[0] = '0' + g_max_dribble;
+        buf[1] = '\0';
+        bg_print(21, start_row + 4, buf);
+    }
+}
+
+/* ============================================================
+   GAME STATES
+   ============================================================ */
+
+/* ---- MENU INIT ---- */
+static void state_menu_init(void) {
+    SMS_displayOff();
+    SMS_VDPturnOffFeature(VDPFEATURE_SHOWDISPLAY);
+
+    /* Reload BG and sprite tiles */
+    SMS_loadTiles(g_bg_tiles, 0, G_BG_TILES_SIZE);
+    SMS_loadTiles(g_spr_p1_tiles,     256, G_SPR_P1_TILES_SIZE);
+    SMS_loadTiles(g_spr_p2_tiles,     320, G_SPR_P2_TILES_SIZE);
+    SMS_loadTiles(g_spr_ball_tiles,   384, G_SPR_BALL_TILES_SIZE);
+    SMS_loadTiles(g_spr_shadow_tiles, 396, G_SPR_SHADOW_TILES_SIZE);
+
+    SMS_loadBGPalette(g_bg_palette);
+    SMS_loadSpritePalette(g_spr_palette);
+    SMS_setBackdropColor(0);
+
+    draw_court();
+
+    /* Title screen logo (simple text) */
+    bg_fill_rect(0, 0, 32, 24, BG_TILE_SKY_DARK);
+    bg_print(10, 4, "PENGPONG");
+    bg_print(9, 5, "=========");
+    bg_print(6, 20, "PRESS A TO START");
+
+    g_menu_page = PAGE_MAIN;
+    g_menu_sel  = 0;
+    draw_menu_page();
+
+    SMS_displayOn();
+    g_current_state = state_menu;
+}
+
+/* ---- MENU UPDATE ---- */
+static void state_menu(void) {
+    u16 keys   = SMS_getKeysStatus();
+    u16 pressed = keys & ~g_prev_keys;
+    g_prev_keys = keys;
+
+    u8 num = g_menu_num_items[g_menu_page];
+
+    if (pressed & PORT_A_KEY_DOWN) {
+        g_menu_sel = (u8)((g_menu_sel + 1) % num);
+        SFX_CLICK();
+        draw_menu_page();
+    }
+    if (pressed & PORT_A_KEY_UP) {
+        g_menu_sel = (u8)((g_menu_sel + num - 1) % num);
+        SFX_CLICK();
+        draw_menu_page();
+    }
+
+    if ((pressed & PORT_A_KEY_1) || (pressed & PORT_A_KEY_2)) {
+        SFX_CLICK();
+        /* Handle selection */
+        if (g_menu_page == PAGE_MAIN) {
+            if (g_menu_sel == 0) { g_menu_page = PAGE_VERSUS;  g_menu_sel = 0; draw_menu_page(); }
+            if (g_menu_sel == 1) { g_menu_page = PAGE_SOLO;    g_menu_sel = 0; draw_menu_page(); }
+            if (g_menu_sel == 2) { g_menu_page = PAGE_OPTIONS; g_menu_sel = 0; draw_menu_page(); }
+        } else if (g_menu_page == PAGE_VERSUS) {
+            if (g_menu_sel == 0) {  /* Start versus */
+                g_ai_game = FALSE;
+                g_current_state = state_game_init;
+            }
+            if (g_menu_sel == 3) { g_menu_page = PAGE_MAIN; g_menu_sel = 0; draw_menu_page(); }
+        } else if (g_menu_page == PAGE_SOLO) {
+            if (g_menu_sel == 0) {  /* Start solo */
+                g_ai_game = TRUE;
+                g_current_state = state_game_init;
+            }
+            if (g_menu_sel == 2) { g_menu_page = PAGE_MAIN; g_menu_sel = 0; draw_menu_page(); }
+        } else if (g_menu_page == PAGE_OPTIONS) {
+            if (g_menu_sel == 0) {
+                g_game_points = (u8)(g_game_points < 60 ? g_game_points + 1 : 1);
+                draw_menu_page();
+            }
+            if (g_menu_sel == 1) {
+                g_max_bounce = (u8)(g_max_bounce < 5 ? g_max_bounce + 1 : 0);
+                draw_menu_page();
+            }
+            if (g_menu_sel == 2) {
+                g_max_dribble = (u8)(g_max_dribble < 5 ? g_max_dribble + 1 : 0);
+                draw_menu_page();
+            }
+            if (g_menu_sel == 3) { g_menu_page = PAGE_MAIN; g_menu_sel = 0; draw_menu_page(); }
+        }
+    }
+    /* Also accept Start (key 1) from port B for second player to navigate */
+    if (pressed & PORT_B_KEY_1) {
+        if (g_menu_page == PAGE_VERSUS && g_menu_sel == 0) {
+            g_ai_game = FALSE;
+            g_current_state = state_game_init;
+        }
+    }
+}
+
+/* ---- GAME INIT ---- */
+static void state_game_init(void) {
+    SMS_displayOff();
+    SMS_VDPturnOffFeature(VDPFEATURE_SHOWDISPLAY);
+
+    draw_court();
+    draw_score();
+
+    init_player(0);
+    init_player(1);
+    init_ball();
+
+    g_change_num = 0;
+    rules_init();
+
+    SMS_displayOn();
+    g_current_state = state_kickoff;
+}
+
+/* ---- KICK-OFF ---- */
+static void state_kickoff(void) {
+    g_player[0].pos_x  = 32;
+    g_player[0].pos_y  = GROUND_Y;
+    g_player[0].vel_x  = 0;
+    g_player[0].vel_y  = 0;
+    g_player[0].in_air = FALSE;
+    g_player[1].pos_x  = (u8)(255u - 32u - 16u);
+    g_player[1].pos_y  = GROUND_Y;
+    g_player[1].vel_x  = 0;
+    g_player[1].vel_y  = 0;
+    g_player[1].in_air = FALSE;
+
+    g_ai_wait    = 30;
+    g_change_num = 0;
+
+    init_ball();
+
+    g_current_state = state_game;
+}
+
+/* ---- GAME UPDATE ---- */
+static void state_game(void) {
+    u16 keys   = SMS_getKeysStatus();
+    u16 pressed = keys & ~g_prev_keys;
+    g_prev_keys = keys;
+
+    /* Pause / back to menu */
+    if (pressed & PORT_A_KEY_2) {
+        psg_silence();
+        g_current_state = state_menu_init;
+        return;
+    }
+
+    /* Read player inputs */
+    g_player[0].input = g_ai_game ? check_ai_input() : read_player_input(0);
+    g_player[1].input = read_player_input(1);
+
+    /* Ball serve on action press */
+    if (g_ball.freeze) {
+        u8 server = g_field;
+        if (!g_ai_game || server == 1) {
+            if (g_player[server].input & INPUT_ACTION) g_ball.freeze = FALSE;
+        }
+    }
+
+    update_player(&g_player[0]);
+    update_player(&g_player[1]);
+    update_ball();
+}
+
+/* ---- POINT WON ---- */
+static void state_point(void) {
+    u16 keys   = SMS_getKeysStatus();
+    u16 pressed = keys & ~g_prev_keys;
+    g_prev_keys = keys;
+
+    g_state_timer--;
+    if (g_state_timer == 0 || (pressed & PORT_A_KEY_1) || (pressed & PORT_B_KEY_1)) {
+        clear_info();
+        rules_change_field((u8)(1 - g_victorious));
+        g_current_state = state_kickoff;
+    }
+}
+
+/* ---- VICTORY INIT ---- */
+static void state_victory_init(void) {
+    g_state_timer = 240;
+    g_player[0].pos_y = GROUND_Y;
+    g_player[1].pos_y = GROUND_Y;
+    g_ball.freeze     = TRUE;
+
+    anim_set_action(&g_player[g_victorious],     ACTION_WIN,   TRUE);
+    anim_set_action(&g_player[1-g_victorious],   ACTION_LOOSE, TRUE);
+
+    /* Display winner */
+    clear_info();
+    if (g_victorious == 0)
+        bg_print(8, 15, "  P1 WINS!");
+    else
+        bg_print(8, 15, "  P2 WINS!");
+
+    SFX_SCORE();
+    g_current_state = state_victory;
+}
+
+/* ---- VICTORY UPDATE ---- */
+static void state_victory(void) {
+    u16 keys   = SMS_getKeysStatus();
+    u16 pressed = keys & ~g_prev_keys;
+    g_prev_keys = keys;
+
+    anim_update_player(&g_player[0]);
+    anim_update_player(&g_player[1]);
+
+    g_state_timer--;
+    if (g_state_timer == 0 || (pressed & PORT_A_KEY_1) || (pressed & PORT_B_KEY_1)) {
+        clear_info();
+        psg_silence();
+        g_current_state = state_menu_init;
+    }
+}
+
+/* ============================================================
+   SPRITE DRAWING FOR CURRENT FRAME
+   ============================================================ */
+static void draw_all_sprites(void) {
+    SMS_initSprites();
+
+    /* Ball */
+    if (!g_ball.freeze || (g_frame_count & 4))  /* blink while frozen */
+        draw_ball_sprite(g_ball.pos_x, g_ball.pos_y, g_ball.anim_frame);
+
+    /* Player 1 (faces right, so no flip = p2=FALSE) */
+    draw_player_sprite(g_player[0].pos_x, g_player[0].pos_y,
+                       g_player[0].anim_frame, FALSE);
+
+    /* Player 2 (faces left = mirrored = p2=TRUE) */
+    draw_player_sprite(g_player[1].pos_x, g_player[1].pos_y,
+                       g_player[1].anim_frame, TRUE);
+
+    /* Shadows */
+    draw_shadow(g_ball.pos_x + 4,     g_ball.pos_y);
+    draw_shadow(g_player[0].pos_x + 4, g_player[0].pos_y);
+    draw_shadow(g_player[1].pos_x + 4, g_player[1].pos_y);
+
+    SMS_copySpritestoSAT();
+}
+
+/* ============================================================
+   MAIN  (entry point; crt0_sms.rel calls main())
+   ============================================================ */
+void main(void) {
+    /* VDP configuration */
+    SMS_VDPturnOnFeature(VDPFEATURE_FRAMEIRQ);
+    SMS_setSpriteMode(SPRITEMODE_TALL);          /* 8×16 sprite mode          */
+    SMS_useFirstHalfTilesforSprites(0);          /* sprites use tiles 256-511 */
+    SMS_setBackdropColor(0);
+
+    /* Palettes */
+    SMS_loadBGPalette(g_bg_palette);
+    SMS_loadSpritePalette(g_spr_palette);
+
+    /* Load tiles into VRAM */
+    SMS_loadTiles(g_bg_tiles,         0,   G_BG_TILES_SIZE);
+    SMS_loadTiles(g_spr_p1_tiles,     256, G_SPR_P1_TILES_SIZE);
+    SMS_loadTiles(g_spr_p2_tiles,     320, G_SPR_P2_TILES_SIZE);
+    SMS_loadTiles(g_spr_ball_tiles,   384, G_SPR_BALL_TILES_SIZE);
+    SMS_loadTiles(g_spr_shadow_tiles, 396, G_SPR_SHADOW_TILES_SIZE);
+
+    /* Hide all sprites initially */
+    SMS_initSprites();
+    SMS_copySpritestoSAT();
+
+    /* Configure text renderer: ASCII 'A'=65 → tile BG_TILE_FONT_BASE + (65-32) */
+    SMS_configureTextRenderer((signed int)(BG_TILE_FONT_BASE - 32));
+
+    /* Default game settings */
+    g_game_points  = SCORE_MAX;
+    g_max_bounce   = 1;
+    g_max_dribble  = 3;
+    g_frame_count  = 0;
+    g_prev_keys    = 0;
+    g_sfx_frames   = 0;
+
+    /* Start at menu */
+    g_current_state = state_menu_init;
+
+    SMS_displayOn();
+
+    /* ======== MAIN LOOP ======== */
+    for (;;) {
+        SMS_waitForVBlank();
+
+        /* Always draw sprites for the current frame */
+        if (g_current_state == state_game    ||
+            g_current_state == state_point   ||
+            g_current_state == state_victory) {
+            draw_all_sprites();
+        } else {
+            SMS_initSprites();
+            SMS_copySpritestoSAT();
+        }
+
+        psg_update();     /* decay SFX */
+
+        /* Run game state */
+        g_current_state();
+
+        g_frame_count++;
+    }
 }
